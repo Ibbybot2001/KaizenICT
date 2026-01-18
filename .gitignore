@@ -25,3 +25,8 @@ logs/
 # VS Code
 .vscode/
 .kanbn/
+
+# Bot Identity
+bot_key
+bot_key.pub
+bot_identity.json
