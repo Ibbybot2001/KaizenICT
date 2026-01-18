@@ -84,9 +84,9 @@ class TimeAuthority:
         self._lock = threading.Lock()
     
     def now(self) -> datetime:
-        """Get current authoritative time."""
+        """Get current authoritative time (Local Naive)."""
         with self._lock:
-            local_time = datetime.now(timezone.utc)
+            local_time = datetime.now()
             return local_time + self.offset
     
     def sync_with_ntp(self, server: str = 'pool.ntp.org'):
@@ -95,8 +95,8 @@ class TimeAuthority:
             import ntplib
             client = ntplib.NTPClient()
             response = client.request(server, version=3)
-            server_time = datetime.fromtimestamp(response.tx_time, tz=timezone.utc)
-            local_time = datetime.now(timezone.utc)
+            server_time = datetime.fromtimestamp(response.tx_time)
+            local_time = datetime.now()
             with self._lock:
                 self.offset = server_time - local_time
             print(f"[TimeAuthority] NTP sync complete. Offset: {self.offset.total_seconds():.3f}s")

@@ -9,7 +9,22 @@ def clear():
 
 def load_state():
     try:
+        if not os.path.exists("live_dashboard.json"):
+            return None
         with open("live_dashboard.json", "r") as f:
+            data = f.read()
+            if not data: return None
+            return json.loads(data)
+    except (json.JSONDecodeError, PermissionError):
+        return None # Silent retry
+    except Exception as e:
+        return None
+
+def load_bridge_stats():
+    try:
+        if not os.path.exists("bridge_stats.json"):
+            return None
+        with open("bridge_stats.json", "r") as f:
             return json.load(f)
     except:
         return None
@@ -33,6 +48,17 @@ def main():
             print(f"\n CURRENT PNL:      {pnl_str}")
             print(f" DAILY TRADES:     {state.get('trades', 0)}")
             print(f" LAST PRICE:       {state.get('last_price', 0):.2f}")
+            
+            # FIDELITY AUDIT
+            b_stats = load_bridge_stats() or {}
+            print("\n [DATA FIDELITY AUDIT]")
+            print(f" IBKR TICKS:       {b_stats.get('ibkr_ticks', 0)}")
+            print(f" GS TICKS:         {b_stats.get('gs_ticks', 0)}")
+            
+            diff = b_stats.get('ibkr_ticks', 0) - b_stats.get('gs_ticks', 0)
+            status_symbol = "✅" if diff == 0 else "⚠️"
+            print(f" SYNC STATUS:      {status_symbol} (Gaps: {diff})")
+            print(f" GS RATE / MIN:    {b_stats.get('gs_rpm', 0)} req/min")
             
             # POOLS
             print("\n [ACTIVE POOLS]")

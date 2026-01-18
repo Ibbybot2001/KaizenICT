@@ -92,12 +92,18 @@ class PoolLevel:
     exit_reason: Optional[str] = None
     pnl: Optional[float] = None
     
+    # Setup Diagnostic Data (Max Description)
+    setup_wick_ratio: Optional[float] = None
+    setup_rel_vol: Optional[float] = None
+    setup_body_ticks: Optional[float] = None
+    setup_disp_zscore: Optional[float] = None
+    
     def __post_init__(self):
         self._record_transition(PoolState.DEFINED, "Pool initialized")
     
     def _record_transition(self, new_state: PoolState, reason: str):
         """Record state transition with timestamp."""
-        timestamp = datetime.now(timezone.utc)
+        timestamp = datetime.now()
         self.state_history.append((timestamp, self.state, new_state, reason))
         self.state = new_state
         logger.info(f"[{self.pool_id}] {self.state.name}: {reason}")
@@ -178,7 +184,9 @@ class PoolFSM:
             f"Sweep detected at bar {bar_time}"
         )
     
-    def on_reclaim(self, bar_time: datetime, bar_close: float) -> bool:
+    def on_reclaim(self, bar_time: datetime, bar_close: float,
+                   wick_ratio: float = 0, rel_vol: float = 0,
+                   body_ticks: float = 0, disp_zscore: float = 0) -> bool:
         """
         Transition: SWEPT → RECLAIMED
         
@@ -190,6 +198,12 @@ class PoolFSM:
         
         self.pool.reclaim_time = bar_time
         self.pool.reclaim_bar_close = bar_close
+        
+        # Store Setup Metrics
+        self.pool.setup_wick_ratio = wick_ratio
+        self.pool.setup_rel_vol = rel_vol
+        self.pool.setup_body_ticks = body_ticks
+        self.pool.setup_disp_zscore = disp_zscore
         
         # Calculate SL/TP
         if self.pool.direction == TradeDirection.LONG:
@@ -305,6 +319,10 @@ class PoolFSM:
             'stop_loss': self.pool.stop_loss,
             'take_profit': self.pool.take_profit,
             'level_price': self.pool.level_price,
+            'wick_ratio': self.pool.setup_wick_ratio,
+            'rel_vol': self.pool.setup_rel_vol,
+            'body_ticks': self.pool.setup_body_ticks,
+            'disp_zscore': self.pool.setup_disp_zscore
         }
 
 
@@ -427,9 +445,44 @@ class BarEventProcessor:
             
             # Check for reclaim (SWEPT → RECLAIMED)
             elif pool.state == PoolState.SWEPT:
-                reclaimed = self._check_reclaim(pool, bar)
+                reclaimed, metrics = self._check_reclaim(pool, bar)
                 if reclaimed:
-                    fsm.on_reclaim(bar.end_time, bar.close)
+                    fsm.on_reclaim(
+                        bar_time=bar.end_time, 
+                        bar_close=bar.close,
+                        wick_ratio=metrics.get('wick_ratio', 0),
+                        rel_vol=metrics.get('rel_vol', 0),
+                        body_ticks=metrics.get('body_ticks', 0),
+                        disp_zscore=metrics.get('disp_zscore', 0)
+                    )
+            
+            # Check for Exit (IN_TRADE → CLOSED)
+            elif pool.state == PoolState.IN_TRADE:
+                exit_hit, exit_price, reason = self._check_exit(pool, bar)
+                if exit_hit:
+                    fsm.on_exit(bar.end_time, exit_price, reason)
+
+    def _check_exit(self, pool: PoolLevel, bar: 'LiveBar') -> tuple[bool, float, str]:
+        """Check for SL/TP hits on a bar."""
+        # Multiplier: $2 per point for MNQ
+        # We handle point PnL here, multiplier is used for risk/accounting
+        
+        if pool.direction == TradeDirection.LONG:
+            # Stop Loss
+            if bar.low <= pool.stop_loss:
+                return True, pool.stop_loss, "STOP_LOSS"
+            # Take Profit
+            if bar.high >= pool.take_profit:
+                return True, pool.take_profit, "TAKE_PROFIT"
+        else: # SHORT
+            # Stop Loss
+            if bar.high >= pool.stop_loss:
+                return True, pool.stop_loss, "STOP_LOSS"
+            # Take Profit
+            if bar.low <= pool.take_profit:
+                return True, pool.take_profit, "TAKE_PROFIT"
+                
+        return False, 0.0, ""
     
     def _check_sweep(self, pool: PoolLevel, bar: 'LiveBar') -> bool:
         """Check if bar sweeps the pool level."""
@@ -440,19 +493,73 @@ class BarEventProcessor:
             # Short: sweep HIGH level (price goes above)
             return bar.high > pool.level_price
     
-    def _check_reclaim(self, pool: PoolLevel, bar: 'LiveBar') -> bool:
-        """Check if bar reclaims (closes back inside) after sweep."""
+    def _check_reclaim(self, pool: PoolLevel, bar: 'LiveBar') -> tuple[bool, dict]:
+        """
+        Check if bar reclaims (closes back inside) after sweep.
+        
+        CRITICAL VALIDATION (Phase 16A):
+        Must satisfy "Displacement" criteria:
+        - Body > 50% of Range
+        - Proves intent, filters out weak reclaims.
+        """
+        # 1. Geometry Check (Did it close inside?)
+        geometry_pass = False
         if pool.direction == TradeDirection.LONG:
             # Long: close above level
-            return bar.close > pool.level_price
+            geometry_pass = bar.close > pool.level_price
         else:
             # Short: close below level
-            return bar.close < pool.level_price
+            geometry_pass = bar.close < pool.level_price
+            
+        if not geometry_pass:
+            return False, {}
+            
+        # 2. Displacement Check (State Filter)
+        bar_range = bar.high - bar.low
+        if bar_range <= 0: return False # Flat bar cannot displace
+        
+        body = abs(bar.close - bar.open)
+        is_displaced = body > (0.5 * bar_range)
+        
+        if not is_displaced:
+            return False, {}
+            
+        # Calculate extra metrics for logging
+        wick_ratio = 0
+        if bar.high > bar.low:
+            if pool.direction == TradeDirection.LONG:
+                wick_ratio = (bar.high - bar.close) / (bar.high - bar.low)
+            else:
+                wick_ratio = (bar.close - bar.low) / (bar.high - bar.low)
+        
+        # Relative Volume (simplified here, since we don't have moving average in bar struct, 
+        # but the processor could track it or assume 1.0)
+        rel_vol = 1.0 # Placeholder or calculate if possible
+        
+        metrics = {
+            'wick_ratio': wick_ratio,
+            'rel_vol': rel_vol,
+            'body_ticks': body,
+            'disp_zscore': 0 # Placeholder for now
+        }
+            
+        return True, metrics
+
 
 
 # ==============================================================================
 # TEST HARNESS
 # ==============================================================================
+
+@dataclass
+class MockBar:
+    end_time: datetime
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float = 0
+    tick_count: int = 0
 
 def run_fsm_transition_test():
     """Test valid and invalid state transitions."""
@@ -469,7 +576,7 @@ def run_fsm_transition_test():
     fsm = PoolFSM(pool)
     
     # Test valid transitions
-    now = datetime.now(timezone.utc)
+    now = datetime.now()
     
     assert fsm.pool.state == PoolState.DEFINED, "Initial state should be DEFINED"
     
@@ -504,7 +611,7 @@ def run_one_trade_per_pool_test():
     print("ONE TRADE PER POOL TEST")
     print("=" * 60)
     
-    now = datetime.now(timezone.utc)
+    now = datetime.now()
     manager = SessionPoolManager(session_date=now)
     
     # Add pool
@@ -549,7 +656,7 @@ def run_race_condition_test():
         opposing_level=110.0
     )
     fsm = PoolFSM(pool)
-    now = datetime.now(timezone.utc)
+    now = datetime.now()
     
     # Attempt concurrent transitions
     results = []
@@ -568,6 +675,39 @@ def run_race_condition_test():
     print("✅ PASS: Race condition immunity verified")
     return True
 
+def run_displacement_logic_test():
+    """Test that BarEventProcessor correctly applies Displacement filter."""
+    print("\n" + "=" * 60)
+    print("DISPLACEMENT LOGIC TEST")
+    print("=" * 60)
+    
+    now = datetime.now()
+    manager = SessionPoolManager(session_date=now)
+    
+    # Add pool (Level 100.0, Long)
+    fsm = manager.add_pool("PDL", 100.0, TradeDirection.LONG, 110.0)
+    # Set to SWEPT state manually for test
+    fsm.on_sweep(now, 99.0, 101.0)
+    
+    processor = BarEventProcessor(manager)
+    
+    # CASE 1: Weak Reclaim (Close > Level but Small Body)
+    # Open: 100.1, Close: 100.2 (Body 0.1), High 100.5, Low 99.0 (Range 1.5) -> Ratio 0.06 < 0.5
+    weak_bar = MockBar(now, 100.1, 100.5, 99.0, 100.2)
+    
+    processor.process_bar(weak_bar)
+    assert fsm.pool.state == PoolState.SWEPT, "Weak bar should NOT trigger reclaim"
+    print("✅ PASS: Weak candle rejected")
+    
+    # CASE 2: strong Reclaim (Close > Level and Big Body)
+    # Open: 99.2, Close: 100.2 (Body 1.0), High 100.2, Low 99.2 (Range 1.0) -> Ratio 1.0 > 0.5
+    strong_bar = MockBar(now, 99.2, 100.2, 99.2, 100.2)
+    
+    processor.process_bar(strong_bar)
+    assert fsm.pool.state == PoolState.RECLAIMED, "Strong bar SHOULD trigger reclaim"
+    print("✅ PASS: Strong candle accepted")
+    
+    return True
 
 def run_all_tests():
     """Run complete test suite."""
@@ -579,6 +719,7 @@ def run_all_tests():
     results.append(("FSM Transitions", run_fsm_transition_test()))
     results.append(("One Trade Per Pool", run_one_trade_per_pool_test()))
     results.append(("Race Condition Immunity", run_race_condition_test()))
+    results.append(("Displacement Logic", run_displacement_logic_test()))
     
     print("\n" + "=" * 60)
     print("TEST RESULTS")
@@ -601,3 +742,4 @@ def run_all_tests():
 
 if __name__ == "__main__":
     run_all_tests()
+

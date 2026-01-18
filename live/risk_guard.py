@@ -36,6 +36,9 @@ class RiskConfig:
     # Execution safety
     MAX_ORDER_SIZE = 1          # Never send order > 1
     MIN_ACCT_VALUE = 1000.0     # Minimum required equity
+    
+    # Warm-up safety
+    MIN_CONTINUITY_MINUTES = 30 # Must have 30 mins of clean data
 
 
 # ==============================================================================
@@ -60,7 +63,11 @@ class RiskGuard:
         self.consecutive_losses = 0
         self.is_halted = False
         self.halt_reason = ""
-        self.last_reset_date = datetime.now(timezone.utc).date()
+        self.last_reset_date = datetime.now().date()
+        
+        # Warm-up state
+        self.data_stream_ready = False
+        self.warmup_status = "WARMING_UP" # Used for dashboard
         
     def check_trade_allowed(self, size: int) -> tuple[bool, str]:
         """
@@ -90,10 +97,13 @@ class RiskGuard:
                 return False, f"Size {size} > Max {RiskConfig.MAX_POSITION_SIZE}"
                 
             # 6. Check Account Value
-            equity = self.get_account_value()
             if equity < RiskConfig.MIN_ACCT_VALUE:
                 self._trigger_halt(f"Low Equity (${equity:.2f} < ${RiskConfig.MIN_ACCT_VALUE})")
                 return False, "Insufficient Equity"
+                
+            # 7. Check Data Continuity (Warm-up)
+            if not self.data_stream_ready:
+                return False, f"Risk Halt: {self.warmup_status}"
                 
             return True, "OK"
             
@@ -130,7 +140,7 @@ class RiskGuard:
             
     def _check_session_reset(self):
         """Auto-reset if date changed (UTC)."""
-        current_date = datetime.now(timezone.utc).date()
+        current_date = datetime.now().date()
         if current_date > self.last_reset_date:
             self.reset_session()
             
@@ -182,7 +192,7 @@ class StateReconciler:
                 anomalies['phantom_trades'].append(f.pool.pool_id)
                 logger.error(f"PHANTOM TRADE DETECTED: Pool {f.pool.pool_id} is IN_TRADE but broker is FLAT.")
                 # Action: Force close FSM
-                f.on_exit(datetime.now(timezone.utc), 0.0, "RECONCILIATION_FORCE_CLOSE")
+                f.on_exit(datetime.now(), 0.0, "RECONCILIATION_FORCE_CLOSE")
 
         # Check 2: Zombie Trades (Dangerous - Real money risk untracked)
         # Result: Position runs without management.
