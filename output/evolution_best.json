@@ -1,0 +1,1 @@
+{"trigger": "Range_1.5x", "context": "Full_US", "sl": 10, "tp": 20, "manager": "Fixed", "be": false, "regime_atr": "Any", "daily_limit": 100}

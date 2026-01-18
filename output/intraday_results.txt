@@ -1,0 +1,12 @@
+TOP 10 NORMAL INTRADAY STRATEGIES (No 3pm):
+--------------------------------------------------
+#1: High_Vol | SB_PM | 120bar | LONG | PnL: 15513.5
+#2: High_Vol | SB_PM | 120bar | LONG | PnL: 15513.5
+#3: High_Vol | SB_PM | 120bar | LONG | PnL: 15513.5
+#4: High_Vol | SB_PM | 120bar | LONG | PnL: 15513.5
+#5: High_Vol | SB_PM | 120bar | LONG | PnL: 15513.5
+#6: High_Vol | SB_PM | 120bar | LONG | PnL: 15513.5
+#7: High_Vol | SB_PM | 120bar | LONG | PnL: 15513.5
+#8: High_Vol | SB_PM | 120bar | LONG | PnL: 15513.5
+#9: High_Vol | SB_PM | 120bar | LONG | PnL: 15513.5
+#10: High_Vol | SB_PM | 120bar | LONG | PnL: 15513.5

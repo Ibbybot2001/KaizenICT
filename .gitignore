@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Logs
+*.log
+live_logs/
+logs/
+
+# Data (Don't version large CSVs usually, but we'll keep the small ones for structure)
+# strategies/mle/data/*.csv
+# !strategies/mle/data/live_ticks.csv # Keep this specific one if small? No, ignore tick data.
+*.csv
+!.gitkeep
+
+# VS Code
+.vscode/
+.kanbn/

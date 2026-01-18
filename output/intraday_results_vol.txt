@@ -1,0 +1,12 @@
+TOP 10 NORMAL INTRADAY STRATEGIES (With Trade Counts):
+------------------------------------------------------------
+#1: High_Vol | SB_PM | 120bar | LONG | PnL: 15513.5 | Trades: 333 (16.6/day)
+#2: High_Vol | SB_PM | 120bar | LONG | PnL: 15513.5 | Trades: 333 (16.6/day)
+#3: High_Vol | SB_PM | 120bar | LONG | PnL: 15513.5 | Trades: 333 (16.6/day)
+#4: High_Vol | SB_PM | 120bar | LONG | PnL: 15513.5 | Trades: 333 (16.6/day)
+#5: High_Vol | SB_PM | 120bar | LONG | PnL: 15513.5 | Trades: 333 (16.6/day)
+#6: High_Vol | SB_PM | 120bar | LONG | PnL: 15513.5 | Trades: 333 (16.6/day)
+#7: High_Vol | SB_PM | 120bar | LONG | PnL: 15513.5 | Trades: 333 (16.6/day)
+#8: High_Vol | SB_PM | 120bar | LONG | PnL: 15513.5 | Trades: 333 (16.6/day)
+#9: High_Vol | SB_PM | 120bar | LONG | PnL: 15513.5 | Trades: 333 (16.6/day)
+#10: High_Vol | SB_PM | 120bar | LONG | PnL: 15513.5 | Trades: 333 (16.6/day)

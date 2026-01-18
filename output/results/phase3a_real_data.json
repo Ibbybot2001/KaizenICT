@@ -1,0 +1,198 @@
+{
+  "direction": [
+    {
+      "primitive_family": "zones",
+      "model_type": "logistic",
+      "label_type": "forward_return_sign",
+      "train_acc_mean": 0.5245596448517829,
+      "train_acc_std": 0.006013242891369666,
+      "test_acc_mean": 0.5361389445557782,
+      "test_acc_std": 0.018557253695733314,
+      "n_samples": 49989,
+      "n_folds": 5,
+      "passed": true
+    },
+    {
+      "primitive_family": "zones",
+      "model_type": "tree",
+      "label_type": "forward_return_sign",
+      "train_acc_mean": 0.5245596448517829,
+      "train_acc_std": 0.005613925356323244,
+      "test_acc_mean": 0.5271209084836339,
+      "test_acc_std": 0.015402351288540504,
+      "n_samples": 49989,
+      "n_folds": 5,
+      "passed": true
+    },
+    {
+      "primitive_family": "displacement",
+      "model_type": "logistic",
+      "label_type": "forward_return_sign",
+      "train_acc_mean": 0.5253043104682801,
+      "train_acc_std": 0.005715581123650665,
+      "test_acc_mean": 0.5366065464261857,
+      "test_acc_std": 0.017781423083291056,
+      "n_samples": 49989,
+      "n_folds": 5,
+      "passed": true
+    },
+    {
+      "primitive_family": "displacement",
+      "model_type": "tree",
+      "label_type": "forward_return_sign",
+      "train_acc_mean": 0.5238436202205357,
+      "train_acc_std": 0.005580216584485784,
+      "test_acc_mean": 0.5333333333333333,
+      "test_acc_std": 0.010634468265668622,
+      "n_samples": 49989,
+      "n_folds": 5,
+      "passed": true
+    },
+    {
+      "primitive_family": "compression",
+      "model_type": "logistic",
+      "label_type": "forward_return_sign",
+      "train_acc_mean": 0.5245882858370328,
+      "train_acc_std": 0.006031222999038758,
+      "test_acc_mean": 0.5362057448229793,
+      "test_acc_std": 0.01853584040861217,
+      "n_samples": 49989,
+      "n_folds": 5,
+      "passed": true
+    },
+    {
+      "primitive_family": "compression",
+      "model_type": "tree",
+      "label_type": "forward_return_sign",
+      "train_acc_mean": 0.5196620363740513,
+      "train_acc_std": 0.005682475411687475,
+      "test_acc_mean": 0.5271209084836339,
+      "test_acc_std": 0.024112398259250285,
+      "n_samples": 49989,
+      "n_folds": 5,
+      "passed": true
+    },
+    {
+      "primitive_family": "liquidity",
+      "model_type": "logistic",
+      "label_type": "forward_return_sign",
+      "train_acc_mean": 0.5245596448517829,
+      "train_acc_std": 0.006013242891369666,
+      "test_acc_mean": 0.5361389445557782,
+      "test_acc_std": 0.018557253695733314,
+      "n_samples": 49989,
+      "n_folds": 5,
+      "passed": true
+    },
+    {
+      "primitive_family": "liquidity",
+      "model_type": "tree",
+      "label_type": "forward_return_sign",
+      "train_acc_mean": 0.5218960332235428,
+      "train_acc_std": 0.009230043536386942,
+      "test_acc_mean": 0.527254509018036,
+      "test_acc_std": 0.00849861132479888,
+      "n_samples": 49989,
+      "n_folds": 5,
+      "passed": true
+    }
+  ],
+  "expansion": [
+    {
+      "primitive_family": "zones",
+      "model_type": "logistic",
+      "label_type": "path_expansion",
+      "train_acc_mean": 0.6450014322543682,
+      "train_acc_std": 0.06473540046340032,
+      "test_acc_mean": 0.6181757434012696,
+      "test_acc_std": 0.12017079290543195,
+      "n_samples": 49979,
+      "n_folds": 5,
+      "passed": true
+    },
+    {
+      "primitive_family": "zones",
+      "model_type": "tree",
+      "label_type": "path_expansion",
+      "train_acc_mean": 0.650358063592094,
+      "train_acc_std": 0.06142400489484426,
+      "test_acc_mean": 0.6304710992315402,
+      "test_acc_std": 0.10605630702700439,
+      "n_samples": 49979,
+      "n_folds": 5,
+      "passed": true
+    },
+    {
+      "primitive_family": "displacement",
+      "model_type": "logistic",
+      "label_type": "path_expansion",
+      "train_acc_mean": 0.7002864508736752,
+      "train_acc_std": 0.02599446587798789,
+      "test_acc_mean": 0.6774473772134981,
+      "test_acc_std": 0.0818375095357285,
+      "n_samples": 49979,
+      "n_folds": 5,
+      "passed": true
+    },
+    {
+      "primitive_family": "displacement",
+      "model_type": "tree",
+      "label_type": "path_expansion",
+      "train_acc_mean": 0.746863362933257,
+      "train_acc_std": 0.017047942713580875,
+      "test_acc_mean": 0.7097226862679585,
+      "test_acc_std": 0.04027101830854518,
+      "n_samples": 49979,
+      "n_folds": 5,
+      "passed": true
+    },
+    {
+      "primitive_family": "compression",
+      "model_type": "logistic",
+      "label_type": "path_expansion",
+      "train_acc_mean": 0.6842165568604983,
+      "train_acc_std": 0.028412172528091417,
+      "test_acc_mean": 0.6570664884731039,
+      "test_acc_std": 0.09088009275505911,
+      "n_samples": 49979,
+      "n_folds": 5,
+      "passed": true
+    },
+    {
+      "primitive_family": "compression",
+      "model_type": "tree",
+      "label_type": "path_expansion",
+      "train_acc_mean": 0.746863362933257,
+      "train_acc_std": 0.017047942713580875,
+      "test_acc_mean": 0.7097226862679585,
+      "test_acc_std": 0.04027101830854518,
+      "n_samples": 49979,
+      "n_folds": 5,
+      "passed": true
+    },
+    {
+      "primitive_family": "liquidity",
+      "model_type": "logistic",
+      "label_type": "path_expansion",
+      "train_acc_mean": 0.647035233457462,
+      "train_acc_std": 0.06153812858725814,
+      "test_acc_mean": 0.6206481790845305,
+      "test_acc_std": 0.11704078475934883,
+      "n_samples": 49979,
+      "n_folds": 5,
+      "passed": true
+    },
+    {
+      "primitive_family": "liquidity",
+      "model_type": "tree",
+      "label_type": "path_expansion",
+      "train_acc_mean": 0.6557146949298196,
+      "train_acc_std": 0.050222231736463153,
+      "test_acc_mean": 0.6333444704310057,
+      "test_acc_std": 0.0966894418742454,
+      "n_samples": 49979,
+      "n_folds": 5,
+      "passed": true
+    }
+  ]
+}

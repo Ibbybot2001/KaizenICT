@@ -1,0 +1,219 @@
+// @version=6
+// @description Late Session Liquidity Fade - Candidate Detector
+// This is a DETECTION tool, not a strategy. It flags candidates for manual review.
+// You must verify against the playbook checklist before any entry.
+
+indicator("Liquidity Fade Detector", overlay=true, max_labels_count=50)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// INPUTS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Session Filter
+sessionStart = input.int(15, "Session Start Hour (EST)", minval=9, maxval=16)
+sessionEnd = input.int(16, "Session End Hour (EST)", minval=10, maxval=17)
+
+// Sweep Detection
+swingLookback = input.int(20, "Swing Lookback", minval=5, maxval=100)
+minSweepSize = input.float(5.0, "Min Sweep Size (pts)", minval=1.0)
+
+// Deep Retrace Detection
+atrPeriod = input.int(14, "ATR Period", minval=5)
+retraceMultiplier = input.float(1.5, "Retrace Threshold (ATR mult)", minval=0.5, step=0.1)
+retraceLookback = input.int(20, "Retrace Lookback Bars", minval=5)
+
+// Display
+showLabels = input.bool(true, "Show Candidate Labels")
+showZones = input.bool(true, "Show Sweep Zones")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SESSION FILTER
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Get current hour (assumes chart is in EST or adjust accordingly)
+currentHour = hour(time, "America/New_York")
+inSession = currentHour >= sessionStart and currentHour < sessionEnd
+
+// Background color for session
+bgcolor(inSession ? color.new(color.green, 95) : na, title="Session Window")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// PRIOR DAY LEVELS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Get prior day high/low
+[pdh, pdl] = request.security(syminfo.tickerid, "D", [high[1], low[1]], lookahead=barmerge.lookahead_on)
+
+// Plot PDH/PDL
+plot(pdh, "PDH", color=color.new(color.red, 50), linewidth=1, style=plot.style_linebr)
+plot(pdl, "PDL", color=color.new(color.blue, 50), linewidth=1, style=plot.style_linebr)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SWING LOWS (for EQL detection)
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Find swing lows
+swingLow = ta.pivotlow(low, swingLookback, swingLookback)
+var float lastSwingLow = na
+if not na(swingLow)
+    lastSwingLow := swingLow
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ATR CALCULATION
+// ══════════════════════════════════════════════════════════════════════════════
+
+atr = ta.atr(atrPeriod)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SWEEP DETECTION
+// ══════════════════════════════════════════════════════════════════════════════
+
+// PDL Sweep: Price goes below PDL
+pdlSwept = low < pdl and low[1] >= pdl
+pdlSweepSize = pdlSwept ? pdl - low : 0.0
+
+// Swing Low Sweep (EQL proxy)
+swingLowSwept = not na(lastSwingLow) and low < lastSwingLow and low[1] >= lastSwingLow
+swingLowSweepSize = swingLowSwept ? lastSwingLow - low : 0.0
+
+// Combined: Any downside sweep
+downsideSweep = (pdlSwept and pdlSweepSize >= minSweepSize) or (swingLowSwept and swingLowSweepSize >= minSweepSize)
+sweepSize = pdlSwept ? pdlSweepSize : swingLowSweepSize
+sweepLevel = pdlSwept ? pdl : lastSwingLow
+sweepType = pdlSwept ? "PDL" : "EQL"
+
+// Track last sweep
+var float lastSweepBar = na
+var float lastSweepLevel = na
+var string lastSweepType = na
+var bool sweepActive = false
+
+if downsideSweep and inSession
+    lastSweepBar := bar_index
+    lastSweepLevel := sweepLevel
+    lastSweepType := sweepType
+    sweepActive := true
+
+// ══════════════════════════════════════════════════════════════════════════════
+// DEEP RETRACE DETECTION
+// ══════════════════════════════════════════════════════════════════════════════
+
+// After a sweep, look for deep retrace (price bounces back significantly)
+barsSinceSweep = sweepActive ? bar_index - lastSweepBar : 9999
+sweepStillValid = barsSinceSweep <= retraceLookback and sweepActive
+
+// Calculate retrace from sweep low (cap lookback to prevent buffer overflow)
+lookbackBars = math.min(int(barsSinceSweep) + 1, 50)  // Max 50 bars lookback
+sweepLow = sweepActive and barsSinceSweep > 0 ? ta.lowest(low, lookbackBars) : low
+retraceFromSweep = close - sweepLow
+retraceThreshold = atr * retraceMultiplier
+
+// Deep retrace confirmed
+deepRetraceConfirmed = sweepStillValid and retraceFromSweep >= retraceThreshold
+
+// ══════════════════════════════════════════════════════════════════════════════
+// CANDIDATE SIGNAL
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Full candidate: In session + Sweep occurred + Deep retrace confirmed
+candidateSignal = inSession and deepRetraceConfirmed and barsSinceSweep >= 3
+
+// Only fire once per sweep
+var bool candidateFired = false
+if downsideSweep
+    candidateFired := false
+
+newCandidate = candidateSignal and not candidateFired
+if newCandidate
+    candidateFired := true
+    sweepActive := false  // Reset for next sweep
+
+// ══════════════════════════════════════════════════════════════════════════════
+// VISUALS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Mark sweep events
+plotshape(downsideSweep and inSession, "Sweep", shape.triangledown, location.belowbar, 
+          color=color.orange, size=size.small)
+
+// Mark candidates (requires manual verification)
+plotshape(newCandidate and showLabels, "CANDIDATE", shape.labelup, location.belowbar,
+          color=color.lime, size=size.normal, text="CHECK", textcolor=color.white)
+
+// Background flash on candidate
+bgcolor(newCandidate ? color.new(color.lime, 80) : na, title="Candidate Alert")
+
+// Draw sweep zone
+if downsideSweep and showZones and inSession
+    sweepBox = box.new(bar_index - 1, sweepLevel, bar_index + 20, low, 
+                       border_color=color.orange, bgcolor=color.new(color.orange, 90))
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ALERTS
+// ══════════════════════════════════════════════════════════════════════════════
+
+alertcondition(newCandidate, "Fade Candidate", "CANDIDATE: Deep retrace after sweep. Check playbook.")
+alertcondition(downsideSweep and inSession, "Sweep Detected", "SWEEP: Downside liquidity swept in session.")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// INFO TABLE
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Track last candidate details
+var float candidateEntry = na
+var float candidateSL = na
+var int candidateBar = na
+
+if newCandidate
+    candidateEntry := close
+    candidateSL := close - 10.0  // 10pt SL for LONG
+    candidateBar := bar_index
+
+var table infoTable = table.new(position.top_right, 2, 10, bgcolor=color.new(color.black, 80))
+
+if barstate.islast
+    table.cell(infoTable, 0, 0, "STATUS", text_color=color.white)
+    table.cell(infoTable, 1, 0, inSession ? "[ACTIVE]" : "[WAIT]", 
+               text_color=inSession ? color.lime : color.gray)
+    
+    table.cell(infoTable, 0, 1, "PDL", text_color=color.white)
+    table.cell(infoTable, 1, 1, str.tostring(pdl, "#.##"), text_color=color.blue)
+    
+    table.cell(infoTable, 0, 2, "ATR(14)", text_color=color.white)
+    table.cell(infoTable, 1, 2, str.tostring(atr, "#.##"), text_color=color.yellow)
+    
+    table.cell(infoTable, 0, 3, "Sweep", text_color=color.white)
+    table.cell(infoTable, 1, 3, sweepActive ? "[YES]" : "---", 
+               text_color=sweepActive ? color.orange : color.gray)
+    
+    table.cell(infoTable, 0, 4, "Retrace", text_color=color.white)
+    retraceStatus = retraceFromSweep >= retraceThreshold ? "[DEEP]" : str.tostring(retraceFromSweep, "#.#") + "/" + str.tostring(retraceThreshold, "#.#")
+    table.cell(infoTable, 1, 4, retraceStatus, 
+               text_color=retraceFromSweep >= retraceThreshold ? color.lime : color.gray)
+    
+    // Trade details section
+    table.cell(infoTable, 0, 5, "--------", text_color=color.gray)
+    table.cell(infoTable, 1, 5, "--------", text_color=color.gray)
+    
+    hasCandidate = not na(candidateEntry)
+    
+    table.cell(infoTable, 0, 6, "Entry", text_color=color.white)
+    table.cell(infoTable, 1, 6, hasCandidate ? str.tostring(candidateEntry, "#.##") : "---", 
+               text_color=hasCandidate ? color.lime : color.gray)
+    
+    table.cell(infoTable, 0, 7, "Stop", text_color=color.white)
+    table.cell(infoTable, 1, 7, hasCandidate ? str.tostring(candidateSL, "#.##") : "---", 
+               text_color=hasCandidate ? color.red : color.gray)
+    
+    barsLeft = hasCandidate ? math.max(0, 20 - (bar_index - candidateBar)) : 0
+    table.cell(infoTable, 0, 8, "Exit In", text_color=color.white)
+    table.cell(infoTable, 1, 8, hasCandidate ? str.tostring(barsLeft) + " bars" : "---", 
+               text_color=hasCandidate ? color.yellow : color.gray)
+    
+    table.cell(infoTable, 0, 9, "Action", text_color=color.white)
+    table.cell(infoTable, 1, 9, hasCandidate ? "VERIFY!" : "WAIT", 
+               text_color=hasCandidate ? color.red : color.gray)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// END
+// ══════════════════════════════════════════════════════════════════════════════

@@ -1,0 +1,14 @@
+Testing C3 (15:00 Long) with 500ms Latency
+============================================================
+
+1. Standard (No BE):
+   Trades: 12
+   PnL: 105.37, PF: 2.51, WR: 41.7%
+
+2. BE @ 5 pts:
+   Trades: 12
+   PnL: 55.37, PF: 2.38, WR: 25.0%
+
+3. BE @ 10 pts:
+   Trades: 12
+   PnL: 45.37, PF: 1.91, WR: 25.0%

@@ -1,0 +1,12 @@
+TOP 10 GENERALIZED US SESSION STRATEGIES (09:30-16:00):
+------------------------------------------------------------
+#1: High_Vol | Full_NY | 120bar | LONG | PnL: 16311.0 | Trades: 1906 (95.3/day)
+#2: High_Vol | Full_NY | 120bar | LONG | PnL: 16311.0 | Trades: 1906 (95.3/day)
+#3: High_Vol | Full_NY | 120bar | LONG | PnL: 16311.0 | Trades: 1906 (95.3/day)
+#4: High_Vol | Full_NY | 120bar | LONG | PnL: 16311.0 | Trades: 1906 (95.3/day)
+#5: High_Vol | Full_NY | 120bar | LONG | PnL: 16311.0 | Trades: 1906 (95.3/day)
+#6: High_Vol | Full_NY | 120bar | LONG | PnL: 16311.0 | Trades: 1906 (95.3/day)
+#7: High_Vol | Full_NY | 120bar | LONG | PnL: 16311.0 | Trades: 1906 (95.3/day)
+#8: High_Vol | Full_NY | 120bar | LONG | PnL: 16311.0 | Trades: 1906 (95.3/day)
+#9: High_Vol | Full_NY | 120bar | LONG | PnL: 16311.0 | Trades: 1906 (95.3/day)
+#10: High_Vol | Full_NY | 120bar | LONG | PnL: 16311.0 | Trades: 1906 (95.3/day)

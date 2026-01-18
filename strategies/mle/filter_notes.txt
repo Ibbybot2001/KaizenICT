@@ -1,0 +1,30 @@
+
+        row = sig_df.iloc[i]
+        curr_time = row.name
+        
+        # --- FILTERS (Pre-Calc to save time) ---
+        
+        # 1. Killzone Filter
+        if config.filter_killzone:
+            # NY Open is 09:30 - 11:00 EST roughly?
+            # Data is likely text based time? Or initialized datetime.
+            # Assuming 'curr_time' is datetime.
+            # Check hour/min.
+            # 14:30 UTC is 09:30 EST (Standard).
+            # Let's assume Data is Naive. What TZ?
+            # Script said 'naive timezone alignment'. Likely UTC or EST.
+            # Let's look at distributions later, but for now apply a time slice.
+            # Simple Time Filter: 09:30 to 16:00 (RTH) or specifc Killzone.
+            # If we don't know the TZ, this is risky.
+            # Assuming M1 data has 'time' column.
+            # Let's skip for now if unsure, OR verify TZ.
+            pass
+            
+        # 2. Trend EMA Filter
+        # Need EMA on Close.
+        # We prepared window = df_m1.iloc[i-20:i+1]
+        # Should calculate EMA(50) on the fly? Or pre-calc in SE.
+        # SE didn't calculate it.
+        # Generating it here is slow inside loop.
+        # Better to add to 'sig_df' in SignalEngine or generating it once before loop.
+        pass

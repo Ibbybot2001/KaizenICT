@@ -1,0 +1,184 @@
+// @version=6
+// Late Session Liquidity Fade - STRATEGY (for backtesting)
+// Converts the detector to a strategy for TradingView's Strategy Tester
+
+strategy("Liquidity Fade Strategy", overlay=true, 
+         default_qty_type=strategy.fixed, default_qty_value=1,
+         initial_capital=10000, commission_type=strategy.commission.per_order, 
+         commission_value=2.5, slippage=1)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// INPUTS
+// ══════════════════════════════════════════════════════════════════════════════
+
+sessionStart = input.int(15, "Session Start Hour (EST)", minval=9, maxval=16)
+sessionEnd = input.int(16, "Session End Hour (EST)", minval=10, maxval=17)
+
+swingLookback = input.int(20, "Swing Lookback", minval=5, maxval=100)
+minSweepSize = input.float(5.0, "Min Sweep Size (pts)", minval=1.0)
+
+atrPeriod = input.int(14, "ATR Period", minval=5)
+retraceMultiplier = input.float(1.5, "Retrace Threshold (ATR mult)", minval=0.5, step=0.1)
+retraceLookback = input.int(20, "Retrace Lookback Bars", minval=5)
+
+stopLossPts = input.float(10.0, "Stop Loss (pts)", minval=1.0)
+exitBars = input.int(20, "Time Exit (bars)", minval=5, maxval=100)
+maxTradesPerDay = input.int(1, "Max Trades Per Day", minval=1, maxval=5)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SESSION FILTER
+// ══════════════════════════════════════════════════════════════════════════════
+
+currentHour = hour(time, "America/New_York")
+inSession = currentHour >= sessionStart and currentHour < sessionEnd
+
+bgcolor(inSession ? color.new(color.green, 95) : na, title="Session Window")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// PRIOR DAY LEVELS
+// ══════════════════════════════════════════════════════════════════════════════
+
+[pdh, pdl] = request.security(syminfo.tickerid, "D", [high[1], low[1]], lookahead=barmerge.lookahead_on)
+
+plot(pdh, "PDH", color=color.new(color.red, 50), linewidth=1, style=plot.style_linebr)
+plot(pdl, "PDL", color=color.new(color.blue, 50), linewidth=1, style=plot.style_linebr)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SWING LOWS
+// ══════════════════════════════════════════════════════════════════════════════
+
+swingLow = ta.pivotlow(low, swingLookback, swingLookback)
+var float lastSwingLow = na
+if not na(swingLow)
+    lastSwingLow := swingLow
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ATR
+// ══════════════════════════════════════════════════════════════════════════════
+
+atr = ta.atr(atrPeriod)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SWEEP DETECTION
+// ══════════════════════════════════════════════════════════════════════════════
+
+pdlSwept = low < pdl and low[1] >= pdl
+pdlSweepSize = pdlSwept ? pdl - low : 0.0
+
+swingLowSwept = not na(lastSwingLow) and low < lastSwingLow and low[1] >= lastSwingLow
+swingLowSweepSize = swingLowSwept ? lastSwingLow - low : 0.0
+
+downsideSweep = (pdlSwept and pdlSweepSize >= minSweepSize) or (swingLowSwept and swingLowSweepSize >= minSweepSize)
+
+// Track sweeps
+var float lastSweepBar = na
+var bool sweepActive = false
+
+if downsideSweep and inSession
+    lastSweepBar := bar_index
+    sweepActive := true
+
+// ══════════════════════════════════════════════════════════════════════════════
+// DEEP RETRACE DETECTION
+// ══════════════════════════════════════════════════════════════════════════════
+
+barsSinceSweep = sweepActive ? bar_index - lastSweepBar : 9999
+sweepStillValid = barsSinceSweep <= retraceLookback and sweepActive
+
+lookbackBars = math.min(int(barsSinceSweep) + 1, 50)
+sweepLow = sweepActive and barsSinceSweep > 0 ? ta.lowest(low, lookbackBars) : low
+retraceFromSweep = close - sweepLow
+retraceThreshold = atr * retraceMultiplier
+
+deepRetraceConfirmed = sweepStillValid and retraceFromSweep >= retraceThreshold
+
+// ══════════════════════════════════════════════════════════════════════════════
+// TRADE MANAGEMENT
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Track trades per day
+var int tradesToday = 0
+var int lastTradeDay = 0
+
+currentDay = dayofweek(time)
+if currentDay != lastTradeDay
+    tradesToday := 0
+    lastTradeDay := currentDay
+
+// Entry signal
+candidateSignal = inSession and deepRetraceConfirmed and barsSinceSweep >= 3
+
+var bool candidateFired = false
+if downsideSweep
+    candidateFired := false
+
+newCandidate = candidateSignal and not candidateFired and tradesToday < maxTradesPerDay
+
+// Track entry bar for time exit
+var int entryBar = na
+
+// ENTRY
+if newCandidate and strategy.position_size == 0
+    strategy.entry("LONG", strategy.long)
+    entryBar := bar_index
+    candidateFired := true
+    sweepActive := false
+    tradesToday += 1
+
+// EXIT CONDITIONS
+inPosition = strategy.position_size > 0
+
+// Stop Loss
+stopPrice = strategy.position_avg_price - stopLossPts
+if inPosition and low <= stopPrice
+    strategy.close("LONG", comment="SL")
+    entryBar := na
+
+// Time Exit (20 bars)
+barsInTrade = inPosition ? bar_index - entryBar : 0
+if inPosition and barsInTrade >= exitBars
+    strategy.close("LONG", comment="TIME")
+    entryBar := na
+
+// ══════════════════════════════════════════════════════════════════════════════
+// VISUALS
+// ══════════════════════════════════════════════════════════════════════════════
+
+plotshape(downsideSweep and inSession, "Sweep", shape.triangledown, location.belowbar, 
+          color=color.orange, size=size.small)
+
+plotshape(newCandidate, "Entry Signal", shape.labelup, location.belowbar,
+          color=color.lime, size=size.normal, text="LONG", textcolor=color.white)
+
+// Plot stop level when in position
+plot(inPosition ? stopPrice : na, "Stop", color=color.red, linewidth=1, style=plot.style_linebr)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// INFO TABLE
+// ══════════════════════════════════════════════════════════════════════════════
+
+var table infoTable = table.new(position.top_right, 2, 6, bgcolor=color.new(color.black, 80))
+
+if barstate.islast
+    table.cell(infoTable, 0, 0, "STATUS", text_color=color.white)
+    table.cell(infoTable, 1, 0, inSession ? "[ACTIVE]" : "[WAIT]", 
+               text_color=inSession ? color.lime : color.gray)
+    
+    table.cell(infoTable, 0, 1, "PDL", text_color=color.white)
+    table.cell(infoTable, 1, 1, str.tostring(pdl, "#.##"), text_color=color.blue)
+    
+    table.cell(infoTable, 0, 2, "Position", text_color=color.white)
+    table.cell(infoTable, 1, 2, inPosition ? "LONG" : "FLAT", 
+               text_color=inPosition ? color.lime : color.gray)
+    
+    table.cell(infoTable, 0, 3, "Trades Today", text_color=color.white)
+    table.cell(infoTable, 1, 3, str.tostring(tradesToday) + "/" + str.tostring(maxTradesPerDay), 
+               text_color=tradesToday >= maxTradesPerDay ? color.orange : color.white)
+    
+    table.cell(infoTable, 0, 4, "Bars In Trade", text_color=color.white)
+    table.cell(infoTable, 1, 4, inPosition ? str.tostring(barsInTrade) + "/" + str.tostring(exitBars) : "---", 
+               text_color=color.yellow)
+    
+    table.cell(infoTable, 0, 5, "Stop", text_color=color.white)
+    table.cell(infoTable, 1, 5, inPosition ? str.tostring(stopPrice, "#.##") : "---", 
+               text_color=color.red)

@@ -1,0 +1,3 @@
+Total Reward: 2.34 R
+Total Trades: 195
+Avg Reward: 0.0120 R/Trade

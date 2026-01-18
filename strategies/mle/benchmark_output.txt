@@ -1,0 +1,11 @@
+
+Benchmark Complete.
+Total Time: 0.0456s
+Time Per Test: 0.000046s
+Tests Per Second: 21944.1
+--------------------------------------------------
+ESTIMATED TIME FOR 10,000,000 TESTS (Single Core):
+   0.13 HOURS
+   (0.01 DAYS)
+--------------------------------------------------
+Device: cpu

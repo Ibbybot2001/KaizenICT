@@ -1,0 +1,57 @@
+﻿============================================================
+PHASE 3B: CONDITIONAL SLICE EVALUATION
+============================================================
+
+Question: Do concepts beat naive vol INSIDE their states?
+
+Loaded 699726 bars
+Using 30000 bars for slice evaluation
+
+Creating conditional slicer...
+Computing gating flags...
+  Processing bar 0/30000
+  Processing bar 10000/30000
+  Processing bar 20000/30000
+
+--- SLICE SIZES ---
+  near_zone: 29964 bars (99.9%)
+  post_displacement: 11303 bars (37.7%)
+  compressed: 7172 bars (23.9%)
+  near_fvg: 29932 bars (99.8%)
+  near_swing: 29838 bars (99.5%)
+
+--- SLICE EVALUATION ---
+
+Evaluating slice: all
+  n=29989, concept_AUC=0.507, naive_AUC=0.520
+
+Evaluating slice: near_zone
+  n=29953, concept_AUC=0.507, naive_AUC=0.520
+
+Evaluating slice: near_fvg
+  n=29921, concept_AUC=0.507, naive_AUC=0.519
+
+Evaluating slice: near_swing
+  n=29827, concept_AUC=0.504, naive_AUC=0.518
+
+Evaluating slice: post_displacement
+  n=11297, concept_AUC=0.529, naive_AUC=0.543
+
+Evaluating slice: compressed
+  n=7168, concept_AUC=0.506, naive_AUC=0.510
+
+Evaluating slice: high_context
+  n=16425, concept_AUC=0.506, naive_AUC=0.519
+
+============================================================
+SUMMARY
+============================================================
+all                  | n=29989 | concept=0.507 vs naive=0.520 | Δ=-0.013 | naive
+near_zone            | n=29953 | concept=0.507 vs naive=0.520 | Δ=-0.012 | naive
+near_fvg             | n=29921 | concept=0.507 vs naive=0.519 | Δ=-0.012 | naive
+near_swing           | n=29827 | concept=0.504 vs naive=0.518 | Δ=-0.014 | naive
+post_displacement    | n=11297 | concept=0.529 vs naive=0.543 | Δ=-0.014 | naive
+compressed           | n= 7168 | concept=0.506 vs naive=0.510 | Δ=-0.004 | naive
+high_context         | n=16425 | concept=0.506 vs naive=0.519 | Δ=-0.013 | naive
+
+Report saved to: C:\Users\CEO\ICT reinforcement\ict_backtest\ml_lab\reports\phase3b_slices.md

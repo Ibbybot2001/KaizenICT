@@ -1,0 +1,61 @@
+﻿============================================================
+PHASE 3B SANITY CHECKS
+============================================================
+Data: 50000 bars
+python : Traceback (most recent call last):
+At line:1 char:1
++ python ml_lab/ml/sanity_checks.py 2>&1 | Out-File 
+-FilePath ml_lab/re ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Tracebac   
+ k (most recent call last)::String) [], RemoteExce    
+ption
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  File "C:\Users\CEO\ICT 
+reinforcement\ict_backtest\ml_lab\ml\sanity_checks.py", 
+line 114, in <module>
+    run_sanity_checks()
+    ~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\CEO\ICT 
+reinforcement\ict_backtest\ml_lab\ml\sanity_checks.py", 
+line 47, in run_sanity_checks
+    features_df = builder.build_feature_matrix(data)
+  File "C:\Users\CEO\ICT reinforcement\ict_backtest\ml_l
+ab\ml\feature_builder.py", line 191, in 
+build_feature_matrix
+    features = self.build_features_at(bar_idx, data)
+  File "C:\Users\CEO\ICT reinforcement\ict_backtest\ml_l
+ab\ml\feature_builder.py", line 162, in 
+build_features_at
+    liq_levels = 
+self.liquidity_detector.compute_all_at(bar_idx, data)
+  File "C:\Users\CEO\ICT reinforcement\ict_backtest\ml_l
+ab\primitives\liquidity.py", line 197, in compute_all_at
+    eq_high = self.find_equal_highs_at(bar_idx, data)
+  File "C:\Users\CEO\ICT reinforcement\ict_backtest\ml_l
+ab\primitives\liquidity.py", line 110, in 
+find_equal_highs_at
+    past_high = data.iloc[i]['high']
+                ~~~~~~~~~^^^
+  File "C:\Users\CEO\AppData\Local\Programs\Python\Pytho
+n313\Lib\site-packages\pandas\core\indexing.py", line 
+1192, in __getitem__
+    return self._getitem_axis(maybe_callable, axis=axis)
+           ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\CEO\AppData\Local\Programs\Python\Pytho
+n313\Lib\site-packages\pandas\core\indexing.py", line 
+1753, in _getitem_axis
+    self._validate_integer(key, axis)
+    ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "C:\Users\CEO\AppData\Local\Programs\Python\Pytho
+n313\Lib\site-packages\pandas\core\indexing.py", line 
+1684, in _validate_integer
+    len_axis = len(self.obj._get_axis(axis))
+                   ~~~~~~~~~~~~~~~~~~^^^^^^
+  File "C:\Users\CEO\AppData\Local\Programs\Python\Pytho
+n313\Lib\site-packages\pandas\core\generic.py", line 
+591, in _get_axis
+    axis_number = self._get_axis_number(axis)
+                  ^^^^^^^^^^^^^^^^^^^^^
+SystemError: error return without exception set

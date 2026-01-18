@@ -1,0 +1,324 @@
+
+//@version=6
+indicator("ICT FVG v6 - Market State Gate", overlay=true, max_bars_back=500)
+
+// =============================================================================
+// 1. INPUTS
+// =============================================================================
+grp_strat = "Strategy Parameters"
+i_swing_lookback = input.int(20, "Swing Lookback", group=grp_strat)
+i_min_displacement = input.float(15.0, "Min Displacement (pts)", group=grp_strat)
+i_fvg_size = input.float(2.0, "Min FVG Size (pts)", group=grp_strat)
+
+grp_gate = "Market State Gate"
+i_htf_lookback = input.int(100, "HTF Lookback", group=grp_gate, tooltip="Bars to assess trend structure")
+i_far_from_high_thresh = input.float(35.0, "Far From High Threshold (pts)", group=grp_gate, tooltip="Reject Longs if price is this far below 100-bar High")
+
+grp_mgmt = "Visual Management"
+i_stop_min = input.float(20.0, "Min Stop (pts)", group=grp_mgmt)
+
+// =============================================================================
+// 2. HELPER FUNCTIONS
+// =============================================================================
+// Check if a Swing High/Low exists at index
+f_is_swing_high(idx, lookback) =>
+    high[idx] == ta.highest(high, lookback*2+1)[idx]
+
+f_is_swing_low(idx, lookback) =>
+    low[idx] == ta.lowest(low, lookback*2+1)[idx]
+
+// =============================================================================
+// 3. MARKET STATE GATE LOGIC
+// =============================================================================
+type MarketState
+    string regime    // "BULLISH", "BEARISH", "RANGING"
+    bool   valid_long
+    bool   valid_short
+    string reason
+
+f_get_market_state(entry_price) =>
+    // 1. Calculate Series Unconditionally (Fixes consistency warning)
+    float window_high = ta.highest(high, i_htf_lookback)
+    float window_low = ta.lowest(low, i_htf_lookback)
+    
+    // 2. Initialize Result
+    MarketState result = MarketState.new("INIT", false, false, "Init")
+
+    // 3. Run Logic Only if Safe (Fixes Runtime Error)
+    if bar_index >= i_htf_lookback + 5
+        // Find Swing Structure in Lookback
+        int lower_highs = 0
+        int higher_highs = 0
+        int lower_lows = 0
+        int higher_lows = 0
+        
+        // Use arrays to store recent swings found in the loop
+        var float[] swing_highs = array.new_float(0)
+        var float[] swing_lows = array.new_float(0)
+        array.clear(swing_highs)
+        array.clear(swing_lows)
+        
+        // Scan backward for swings
+        // Must start at 2 to check [i-2], [i-1] (bars to the right/newer)
+        for i = 2 to i_htf_lookback
+            bool is_h = high[i] >= high[i-1] and high[i] >= high[i+1] and high[i] >= high[i-2] and high[i] >= high[i+2]
+            bool is_l = low[i] <= low[i-1] and low[i] <= low[i+1] and low[i] <= low[i-2] and low[i] <= low[i+2]
+            
+            if is_h
+                array.unshift(swing_highs, high[i]) // Latest first
+            if is_l
+                array.unshift(swing_lows, low[i])
+                
+        // Analyze Structure (Last 4 swings)
+        int h_count = math.min(array.size(swing_highs), 4)
+        int l_count = math.min(array.size(swing_lows), 4)
+
+        if h_count >= 2
+            for i = 0 to h_count - 2
+                if array.get(swing_highs, i) < array.get(swing_highs, i+1)
+                    lower_highs += 1
+                else
+                    higher_highs += 1
+        
+        if l_count >= 2
+            for i = 0 to l_count - 2
+                if array.get(swing_lows, i) > array.get(swing_lows, i+1)
+                    higher_lows += 1
+                else
+                    lower_lows += 1
+
+        // Determine Regime
+        string regime = "RANGING"
+        float pos = (entry_price - window_low) / (window_high - window_low)
+        
+        // Bearish Priority
+        if (pos < 0.5 and lower_highs >= 1) or (lower_highs >= 2) or (lower_lows >= 2)
+            regime := "BEARISH"
+        else if (higher_highs >= 2 and higher_lows >= 1) or (higher_lows >= 2 and lower_highs == 0)
+            regime := "BULLISH"
+            
+        // --- Proximity Checks ---
+        bool ok_long = true
+        bool ok_short = true
+        string reason = ""
+        
+        // FAR FROM HIGH Check
+        if (window_high - entry_price) > i_far_from_high_thresh
+            ok_long := false
+            reason := "FAR_FROM_HIGH"
+        
+        // Proximity to Descending Resistance
+        if h_count >= 2
+            float last_h = array.get(swing_highs, 0)
+            float prev_h = array.get(swing_highs, 1)
+            if last_h < prev_h and entry_price > last_h * 0.998
+                ok_long := false
+                reason := "AT_RESISTANCE"
+                
+        // State Filter
+        if regime == "BEARISH"
+            ok_long := false
+            if reason == "" 
+                reason := "Trend BEARISH"
+                
+        if regime == "BULLISH"
+            ok_short := false
+            if reason == "" 
+                reason := "Trend BULLISH"
+                
+        result := MarketState.new(regime, ok_long, ok_short, reason)
+        
+    result
+
+// =============================================================================
+// 4. MAIN LOGIC
+// =============================================================================
+
+// Swing Detection
+var float swing_low_price = na
+var int swing_low_idx = na
+bool new_swing_low = low[i_swing_lookback] == ta.lowest(low, i_swing_lookback * 2 + 1)
+if new_swing_low
+    swing_low_price := low[i_swing_lookback]
+    swing_low_idx := bar_index[i_swing_lookback]
+
+plotshape(new_swing_low, "Swing Low", shape.triangleup, location.belowbar, color.yellow, size=size.tiny, offset=-i_swing_lookback)
+
+// Sweep Detection
+bool sweep_detected = not na(swing_low_price) and low < swing_low_price and close > swing_low_price
+var float sweep_level = na
+var int sweep_bar_index = na
+
+if sweep_detected
+    sweep_level := swing_low_price
+    sweep_bar_index := bar_index
+    
+// Displacement & FVG (Entry Logic)
+// We look for entry within 30 bars of a sweep
+bool in_setup_window = not na(sweep_bar_index) and (bar_index - sweep_bar_index) <= 30
+
+// FVG Detection
+// A simple bullish FVG: high[2] < low[0]
+bool bullish_fvg = high[2] < low[0] and (low[0] - high[2]) >= i_fvg_size and close > open
+
+// Retest Trigger: We want to catch the moment price retests FVG and confirms
+// This is simplified for indicator to avoid complex state tracking
+bool fvg_retest = in_setup_window and low <= low[0] and close > high[2] 
+
+// --- ENTRY SIGNALS ---
+
+// 1. Calculate State Globally (Required for consistency)
+MarketState current_state = f_get_market_state(close)
+
+// 2. Track Highest High since Sweep (Avoids conditional ta.highest)
+var float highest_high_in_setup = na
+if sweep_detected
+    highest_high_in_setup := high
+else if in_setup_window
+    highest_high_in_setup := math.max(nz(highest_high_in_setup, high), high)
+
+var float long_sl = na
+var float long_tp = na
+bool signal_long = false
+string signal_label = ""
+bool signal_rej = false
+string rej_reason = ""
+
+if in_setup_window and bullish_fvg
+    // Measure Displacement efficiently
+    float disp = highest_high_in_setup - low
+    
+    if disp >= i_min_displacement
+        // CHECK STATE GATE
+        if current_state.valid_long
+            // Valid Entry Signal
+            signal_long := true
+            signal_label := "LONG\n" + current_state.regime
+            
+            // Calculate Levels for visualization
+            float sl = math.min(low[1], sweep_level - 2)
+            float dist = close - sl
+            if dist < i_stop_min
+                sl := close - i_stop_min
+            
+            long_sl := sl
+            long_tp := close + dist * 1.5
+            
+        else
+            // Rejected
+            signal_rej := true
+            rej_reason := current_state.reason
+
+// Plot Signals (Global Scope)
+// plotshape uses const string for text, so we use label.new for dynamic text
+plotshape(signal_long, "Long Entry", shape.triangleup, location.belowbar, color.green, size=size.small)
+
+if signal_long
+    label.new(bar_index, low, signal_label, color=color.green, style=label.style_label_up, textcolor=color.white, size=size.small)
+    alert("LONG Signal: " + current_state.regime, alert.freq_once_per_bar_close)
+    
+    // --- VISUAL CONTEXT (Trade Lifecycle) ---
+    // We simulate the trade to draw the EXACT duration lines
+    var bool in_trade = false
+    var float t_entry = na
+    var float t_sl = na
+    var float t_tp = na
+    var int t_idx = na
+    var line l_entry = na
+    var line l_sl = na
+    var line l_tp = na
+    var box b_fvg = na
+    var label lbl_info = na
+    
+    // 1. New Trade Trigger
+    if signal_long and not in_trade
+        in_trade := true
+        t_entry := close
+        t_sl := long_sl
+        t_tp := long_tp
+        t_idx := bar_index
+        
+        // FVG Box (Fixed 5 bars back to Entry)
+        string tf = timeframe.period == "D" ? "Daily" : timeframe.period + "m" 
+        b_fvg := box.new(bar_index - 5, high[2], bar_index, low[0], bgcolor=color.new(color.green, 85), border_color=color.new(color.green, 50), text=tf + " FVG", text_color=color.green, text_size=size.tiny)
+        
+        // Create Lines (Extended by default, will cut on exit)
+        l_entry := line.new(bar_index, close, bar_index + 10, close, color=color.white, style=line.style_dotted)
+        l_sl := line.new(bar_index, long_sl, bar_index + 10, long_sl, color=color.red, width=2)
+        l_tp := line.new(bar_index, long_tp, bar_index + 10, long_tp, color=color.blue, width=2)
+        
+        // Info Label
+        float risk = close - long_sl
+        float reward = long_tp - close
+        float rr = reward / math.max(risk, 0.1)
+        string info = "Entry: " + str.tostring(close, "#.##") + "\nTP: " + str.tostring(long_tp, "#.##") + "\nSL: " + str.tostring(long_sl, "#.##") + "\nRR: " + str.tostring(rr, "#.1f")
+        lbl_info := label.new(bar_index, high, info, color=color.new(color.blue, 90), textcolor=color.white, style=label.style_label_lower_left, size=size.small)
+
+    // 2. Manage Active Trade
+    if in_trade
+        // Extend Lines
+        line.set_x2(l_entry, bar_index)
+        line.set_x2(l_sl, bar_index)
+        line.set_x2(l_tp, bar_index)
+        label.set_x(lbl_info, bar_index)
+        
+        // Check Outcomes
+        bool hit_tp = high >= t_tp
+        bool hit_sl = low <= t_sl
+        bool timeout = (bar_index - t_idx) > 120
+        bool exit = hit_tp or hit_sl or timeout
+        
+        if exit
+            in_trade := false
+            // Update Visuals for Final State
+            if hit_tp
+                line.set_color(l_entry, color.green)
+                label.set_color(lbl_info, color.new(color.green, 85))
+                label.set_text(lbl_info, label.get_text(lbl_info) + "\n✅ WIN")
+            else if hit_sl
+                line.set_color(l_entry, color.red)
+                label.set_color(lbl_info, color.new(color.red, 85))
+                label.set_text(lbl_info, label.get_text(lbl_info) + "\n❌ LOSS")
+            else
+                line.set_color(l_entry, color.gray)
+                label.set_text(lbl_info, label.get_text(lbl_info) + "\n🕑 TIMEOUT")
+            
+            // Fix Box Extension
+            box.set_right(b_fvg, bar_index)
+    
+    // Capture Stats (Simulation loop would be needed for accurate historical, but we show current state here)
+
+if signal_rej
+    label.new(bar_index, low, "REJ: " + rej_reason, color=color.gray, style=label.style_label_up, size=size.small)
+
+// =============================================================================
+// 5. DASHBOARD (Performance Panel)
+// =============================================================================
+// Simulate Backtest Stats for Dashboard Display
+// Note: accurate PnL requires strategy(), but we simulate hit-rate here for the visual
+var int total_trades = 0
+var int wins = 0
+var int losses = 0
+
+if signal_long
+    total_trades := total_trades + 1
+    // Simple outcome simulation: if price hits TP before SL in next 100 bars
+    // This is expensive to loop. We will just display the SIGNAL count for now.
+
+var table perf_panel = table.new(position.top_right, 2, 4, bgcolor=color.new(color.black, 20), border_color=color.new(color.white, 80), border_width=1, frame_color=color.white, frame_width=1)
+if barstate.islast
+    // Header
+    table.cell(perf_panel, 0, 0, "ICT FVG v6", text_color=color.white, bgcolor=color.new(color.blue, 60), text_size=size.normal)
+    table.cell(perf_panel, 1, 0, "MASTER", text_color=color.white, bgcolor=color.new(color.blue, 60), text_size=size.normal)
+    
+    // Market State
+    table.cell(perf_panel, 0, 1, "State", text_color=color.white, text_size=size.small)
+    table.cell(perf_panel, 1, 1, current_state.regime, text_color=current_state.regime == "BULLISH" ? color.green : current_state.regime == "BEARISH" ? color.red : color.yellow, text_size=size.small)
+    
+    // Signals
+    table.cell(perf_panel, 0, 2, "Signals", text_color=color.white, text_size=size.small)
+    table.cell(perf_panel, 1, 2, str.tostring(total_trades), text_color=color.white, text_size=size.small)
+    
+    // Active Filter
+    table.cell(perf_panel, 0, 3, "Filter", text_color=color.white, text_size=size.small)
+    table.cell(perf_panel, 1, 3, current_state.reason == "" ? "None" : current_state.reason, text_color=color.gray, text_size=size.small)

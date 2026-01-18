@@ -1,0 +1,12 @@
+TOP 10 HIGH FREQUENCY SCALPING STRATEGIES (With Trade Counts):
+------------------------------------------------------------
+#1: Disp_Down | All_Day | 15bar | LONG | PnL: 9762.5 | Trades: 1979 (99.0/day)
+#2: Disp_Down | All_Day | 15bar | LONG | PnL: 9762.5 | Trades: 1979 (99.0/day)
+#3: Disp_Down | All_Day | 15bar | LONG | PnL: 9762.5 | Trades: 1979 (99.0/day)
+#4: Bear_Candle | All_Day | 15bar | LONG | PnL: 9762.5 | Trades: 1979 (99.0/day)
+#5: Disp_Down | All_Day | 15bar | LONG | PnL: 9762.5 | Trades: 1979 (99.0/day)
+#6: Bear_Candle | All_Day | 15bar | LONG | PnL: 9762.5 | Trades: 1979 (99.0/day)
+#7: Bear_Candle | All_Day | 15bar | LONG | PnL: 9762.5 | Trades: 1979 (99.0/day)
+#8: Disp_Down | All_Day | 15bar | LONG | PnL: 9762.5 | Trades: 1979 (99.0/day)
+#9: Disp_Down | All_Day | 15bar | LONG | PnL: 9762.5 | Trades: 1979 (99.0/day)
+#10: Bear_Candle | All_Day | 15bar | LONG | PnL: 9762.5 | Trades: 1979 (99.0/day)
