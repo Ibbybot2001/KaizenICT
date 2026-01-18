@@ -186,12 +186,18 @@ class BarBuilder:
             
             return closed_bar
     
+    def clock_tick(self) -> Optional[LiveBar]:
+        """
+        Passive check for bar close based on WALL CLOCK.
+        Call this periodically if no ticks are arriving.
+        """
+        with self._lock:
+            wall_time = self.time_authority.now()
+            return self._check_bar_close(wall_time)
+
     def force_close(self) -> Optional[LiveBar]:
         """
-        Force close current bar (e.g., end of session).
-        
-        Returns:
-            Finalized bar if one was open, else None.
+        Force close current bar (intended for SHUTDOWN).
         """
         with self._lock:
             wall_time = self.time_authority.now()

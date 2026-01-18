@@ -129,28 +129,13 @@ class GoldenBot:
         # 2. ALWAYS Log Raw Tick (Feeds Engine/Dashboard every 5s)
         self.log_tick_only(last_bar.date, last_bar.close)
 
-        # 3. Finalized Bar Processing (Signals & Logging)
-        if not has_new_bar:
-            return
-            
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] Bar Closed: {last_bar.close}")
-        
-        # Check for Signals
-        signal, details = self.check_signals(self.df)
-        
-        # Log Event (Legacy Rich Data + Google Sheets)
-        m = self.latest_metrics
-        self.log_event(
-            last_bar.date, last_bar.close, signal or "BAR", details, 
-            m['vol'], m['wick'], m['body'], m['dh'], m['dl'], m['dist_h'], m['dist_l']
-        )
-        
-        # Execute if Signal
-        if signal and not self.in_position:
-            self.execute_trade(signal, last_bar.close)
-            self.in_position = True 
-        elif not signal:
-            self.in_position = False 
+        # 3. Finalized Bar Processing
+        # [DE-DUPLICATION]: Log only raw ticks here. 
+        # The Live Engine is the sole authority for 1-minute bars and logic.
+        if has_new_bar:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] IBKR Bar Closed: {last_bar.close}")
+            # The engine handles rich logging to Google Sheets to avoid 1Hz conflict
+            pass
 
     async def heartbeat_loop(self):
         """Ensures a gapless 1Hz data stream even when market is quiet."""

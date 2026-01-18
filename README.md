@@ -49,6 +49,7 @@ This repository contains an institutional-grade, fully automated trading system 
 ---
 
 ## 🛠️ CORE FEATURES
+- **Single-Authority Logging**: Eliminated log-bloat by centralizing bar finalization in the Engine. Bridge remains dedicated to high-fidelity tick feed.
 - **1Hz Sync Mode**: Micro-batches all ticks every 1.1s for perfect Google Sheets consistency without quota blocks.
 - **Forced Heartbeat**: Guarantees a clinical 1Hz stream even during zero-volume market periods.
 - **Fidelity Audit**: Real-time measurement of raw data vs. logged data to ensure 0.0% data loss.

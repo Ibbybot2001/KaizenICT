@@ -268,8 +268,8 @@ class LiveEngine:
 
                 line = f.readline()
                 if not line:
-                    # No new data: Check for time-based bar close
-                    self.bar_builder.force_close()  # Checks wall-clock
+                    # No new data: Check for time-based bar close (PASSIVE)
+                    self.bar_builder.clock_tick() 
                     time.sleep(POLL_INTERVAL)
                     continue
                 
