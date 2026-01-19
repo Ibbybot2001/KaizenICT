@@ -37,6 +37,13 @@ This repository contains an institutional-grade, fully automated trading system 
 - `sentinel.log`: Diagnostic history of system restarts and health checks.
 - `live_ticks.csv`: Raw, unthrottled local tick record.
 
+### 📜 AUDIT & CERTIFICATION
+| Document | Purpose |
+| :--- | :--- |
+| [Forensic Audit V2.1](docs/audit_reports/forensic_audit_v2_1.md) | **Causal Integrity**. Proof of zero-lookahead and temporal correctness. |
+| [System Workflow](docs/audit_reports/system_workflow.md) | **Operational Blueprint**. Detailed map of the 10-step data lifecycle. |
+| [Certification Report](docs/audit_reports/certification_report.md) | **Production Hand-off**. Final sign-off on Risk, FSM, and Sentinel layers. |
+
 ---
 
 ## 🚀 LAUNCH PROTOCOL (PRODUCTION)
