@@ -85,17 +85,44 @@ fvg_bull = low > high[2]
 fvg_bear = high < low[2]
 
 // -------------------------------------------------------------------------
+// STATEFUL LOGIC (The "Memory" Patch)
+// -------------------------------------------------------------------------
+var bool swept_ib_l = false
+var bool swept_ib_h = false
+var bool swept_asia_l = false
+var bool swept_asia_h = false
+
+if is_new_day_tracker
+    swept_ib_l := false
+    swept_ib_h := false
+    swept_asia_l := false
+    swept_asia_h := false
+
+// Update Sweep State (Latch)
+if ib_active
+    if low < ib_l
+        swept_ib_l := true
+    if high > ib_h
+        swept_ib_h := true
+
+if asia_active
+    if low < asia_l
+        swept_asia_l := true
+    if high > asia_h
+        swept_asia_h := true
+
+// -------------------------------------------------------------------------
 // 4. SIGNAL GENERATION
 // -------------------------------------------------------------------------
 // Valid Trade Window: 10:00 AM - 15:55 PM
 valid_window = not na(time(timeframe.period, "1000-1555", tz))
 
-// Logic Matches Python Bridge
-ib_long  = ib_active and valid_window and (low < ib_l) and fvg_bull
-ib_short = ib_active and valid_window and (high > ib_h) and fvg_bear
+// Logic Matches Research (Stateful Sweep + FVG)
+ib_long  = ib_active and valid_window and swept_ib_l and fvg_bull
+ib_short = ib_active and valid_window and swept_ib_h and fvg_bear
 
-asia_long  = asia_active and valid_window and (low < asia_l) and fvg_bull
-asia_short = asia_active and valid_window and (high > asia_h) and fvg_bear
+asia_long  = asia_active and valid_window and swept_asia_l and fvg_bull
+asia_short = asia_active and valid_window and swept_asia_h and fvg_bear
 
 // -------------------------------------------------------------------------
 // 5. STRATEGY EXECUTION (PRIORITY: ASIA)
