@@ -141,6 +141,17 @@ def run_backtest(bars_df, params):
                 tp = entry - params['tp_target']
                 direction = -1
                 signal = True
+            
+            # TREND FILTER
+            if signal and params.get('trend_col'):
+                trend_val = row.get(params['trend_col'])
+                if pd.isna(trend_val): 
+                    signal = False
+                else:
+                    # Long must be > Trend
+                    if direction == 1 and row['close'] < trend_val: signal = False
+                    # Short must be < Trend
+                    if direction == -1 and row['close'] > trend_val: signal = False
                 
             if signal:
                 # SIMULATE (Look Ahead)
@@ -201,21 +212,44 @@ if __name__ == '__main__':
     
     full_df = pd.concat(all_bars)
     
-    # ENGINEER BOTH
+    # ==============================================================================
+    # 2. TREND & POOL LOGIC (Updated)
+    # ==============================================================================
+    # ENGINEER FEATURES
     full_df = engineer_pools(full_df)
     full_df = engineer_fvg(full_df)
+    
+    # Add SMA Trend Filters
+    full_df['SMA_200'] = full_df['close'].rolling(200).mean()
+    full_df['SMA_800'] = full_df['close'].rolling(800).mean()
     
     # Split
     train_mask = full_df['time'].dt.month.isin(TRAIN_MONTHS)
     train_df = full_df[train_mask]
     test_df = full_df[~train_mask]
     
-    # Params
+    # PARAM GRID (MASSIVE 10k)
+    # TP: 20 to 150 step 5 (27 items)
+    # SL: 3 to 15 step 1 (13 items)
+    # Pools: 6 Combos
+    # Trend: 3 Options
+    # Total: ~6,300 combos. 
+    
+    pool_options = [
+        ['IB_L', 'IB_H'],
+        ['ONL', 'ONH'],
+        ['PDL', 'PDH'],
+        ['ASIA_L', 'ASIA_H'],
+        ['IB_L', 'IB_H', 'ONL', 'ONH'],
+        ['IB_L', 'IB_H', 'PDL', 'PDH']
+    ]
+    
     param_grid = {
-        'pools': POOLS,
-        'tp_target': TP_TARGETS,
-        'sl_buffer': SL_BUFFERS,
-        'max_trades': MAX_TRADES
+        'pools': pool_options,
+        'tp_target': range(20, 155, 5),
+        'sl_buffer': range(3, 16, 1),
+        'max_trades': [2],
+        'trend_col': [None, 'SMA_200', 'SMA_800']
     }
     keys, values = zip(*param_grid.items())
     combos = [dict(zip(keys, v)) for v in itertools.product(*values)]
@@ -226,7 +260,10 @@ if __name__ == '__main__':
     with Pool(NUM_CORES, initializer=init_worker, initargs=(train_df, test_df)) as pool:
         for res in pool.imap_unordered(evaluate_params, work_items):
             if res:
-                logger.info(f"DATA: {res['params']} | PF: {res['test_pf']:.2f} | Trades: {res['test_trades']}")
-                pd.DataFrame([res]).to_csv(OUTPUT_DIR / "hybrid_results_raw.csv", mode='a', header=not (OUTPUT_DIR / "hybrid_results_raw.csv").exists(), index=False)
+                # Log only respectable results to keep file size managed
+                if res['test_pf'] > 1.2:
+                    logger.info(f"DATA: {res['params']} | PF: {res['test_pf']:.2f} | Trades: {res['test_trades']}")
+                # Always save raw data
+                pd.DataFrame([res]).to_csv(OUTPUT_DIR / "hybrid_results_10k.csv", mode='a', header=not (OUTPUT_DIR / "hybrid_results_10k.csv").exists(), index=False)
     
     print("Search Complete.")

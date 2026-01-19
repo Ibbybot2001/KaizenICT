@@ -38,6 +38,24 @@ Blind FVGs (Pilot 2) failed (PF 0.99) because many FVGs are just noise.
 - The **Sweep** identifies the "Trap" (stops triggered).
 - The **FVG** confirms the "Smart Money Reversal".
 
-## 🚀 Next Steps
-1.  Deploy to `production_backtest_audit.py` to verify with full fees/slippage.
-2.  Add to Live Engine.
+## 🚀 Portfolio Deployment Plan (The "Volume" Solution)
+To achieve **3-5 trades per day**, we deploy a **Hybrid Portfolio**:
+
+1.  **Strategy A (IB Hybrid)**:
+    - Trigger: Sweep of `IB_H` / `IB_L` (09:30-10:00).
+    - Settings: **TP 55, SL 5**.
+2.  **Strategy B (ASIA Hybrid)**:
+    - Trigger: Sweep of `ASIA_H` / `ASIA_L`.
+    - Settings: **TP 85, SL 5** (Higher R:R).
+    
+### 🔄 Correlation & Overlap
+- **Overlap Rate**: 42% of trades are identical.
+- **Conflict Rule**: If *both* signal (Overlap), **Prioritize Strategy B (ASIA)** because it targets 85pts (EV Winner).
+- **Net Volume**: ~774 Trades/Year (**~3.1 Trades/Day**).
+
+## 🛠 Next Steps
+1.  **Update `ibkr_bridge.py`**:
+    - Add `check_hybrid_signal()` method.
+    - Implement the "Overlap Priority" logic.
+    - Enable both sets of pools (`IB` and `ASIA`).
+2.  **Go Live**: Monitor for 1 week.
