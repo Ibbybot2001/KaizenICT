@@ -21,7 +21,8 @@ var bool ib_active = false
 
 // Detect IB Session
 is_ib_session = not na(time(timeframe.period, "0930-1000", tz))
-is_new_day    = ta.change(time("D"))
+// Fix: Explicit bool cast
+is_new_day    = ta.change(time("D")) != 0
 
 if is_new_day
     ib_h := na
@@ -52,12 +53,10 @@ var float asia_l = na
 var bool asia_active = false
 
 // Detect ASIA Session (18:00 - 00:00)
-// Note: In Pine, "1800-0000".
 is_asia_session = not na(time(timeframe.period, "1800-0000", tz))
 
 if is_asia_session
     // Reset if this is the START of Asia (18:00)
-    // Simple check: if we were NOT in asia last bar, reset
     if not is_asia_session[1]
         asia_h := high
         asia_l := low
@@ -65,12 +64,9 @@ if is_asia_session
         asia_h := math.max(asia_h, high)
         asia_l := math.min(asia_l, low)
     asia_active := true
-else
-    // Outside Asia
-    pass
+// Logic: if outside session, do nothing (keep values)
 
 // Plot ASIA Levels (Blue)
-// Show all day until reset
 plot(show_asia and asia_active ? asia_h : na, "Asia High", color=color.new(color.blue, 50), style=plot.style_linebr)
 plot(show_asia and asia_active ? asia_l : na, "Asia Low", color=color.new(color.blue, 50), style=plot.style_linebr)
 
@@ -85,11 +81,6 @@ fvg_bear = high < low[2]
 // -------------------------------------------------------------------------
 
 // A. IB Signals
-// Long: Low swept IB_L, then Bullish FVG
-// Stateless logic (like Bridge): simple check if Close is back inside or FVG validates the sweep
-// Python Bridge Logic: "if is_sweep_low and row['fvg_bull']"
-// is_sweep_low means `low < ib_l`.
-
 ib_long_cond  = ib_active and is_us_session and (low < ib_l) and fvg_bull
 ib_short_cond = ib_active and is_us_session and (high > ib_h) and fvg_bear
 
@@ -97,38 +88,23 @@ ib_short_cond = ib_active and is_us_session and (high > ib_h) and fvg_bear
 asia_long_cond  = asia_active and is_us_session and (low < asia_l) and fvg_bull
 asia_short_cond = asia_active and is_us_session and (high > asia_h) and fvg_bear
 
-// C. Conflict Resolution (Priority)
-// If both, we label as ASIA (since it's the priority)
-// But for visual, we can just plot them distinct or combined.
-
-signal_long = false
-signal_short = false
-label_txt = ""
-label_col = color.gray
-
-if asia_long_cond
-    signal_long := true
-    label_txt := "ASIA\nHybrid"
-    label_col := color.blue
-else if ib_long_cond
-    signal_long := true
-    label_txt := "IB\nHybrid"
-    label_col := color.green
-
-if asia_short_cond
-    signal_short := true
-    label_txt := "ASIA\nHybrid"
-    label_col := color.blue
-else if ib_short_cond
-    signal_short := true
-    label_txt := "IB\nHybrid"
-    label_col := color.green
-
 // -------------------------------------------------------------------------
 // 5. PLOTTING
 // -------------------------------------------------------------------------
-plotshape(signal_long, title="Long", style=shape.triangleup, location=location.belowbar, color=label_col, size=size.small, text=label_txt, textcolor=color.white)
-plotshape(signal_short, title="Short", style=shape.triangledown, location=location.abovebar, color=label_col, size=size.small, text=label_txt, textcolor=color.white)
 
-// Add Alert Hook (Optional)
-alertcondition(signal_long or signal_short, title="Hybrid Signal", message="Titan Hybrid Signal Detected")
+// ASIA Plots (Priority)
+plotshape(asia_long_cond, title="ASIA Long", style=shape.triangleup, location=location.belowbar, color=color.blue, size=size.small, text="ASIA\nHybrid", textcolor=color.white)
+plotshape(asia_short_cond, title="ASIA Short", style=shape.triangledown, location=location.abovebar, color=color.blue, size=size.small, text="ASIA\nHybrid", textcolor=color.white)
+
+// IB Plots (Secondary - Only if NOT Asia to avoid clutter, or plot slightly offset?)
+// For now, plot distinct.
+
+// Avoid Overlap Visual:
+plot_ib_long = ib_long_cond and not asia_long_cond
+plot_ib_short = ib_short_cond and not asia_short_cond
+
+plotshape(plot_ib_long, title="IB Long", style=shape.triangleup, location=location.belowbar, color=color.green, size=size.small, text="IB\nHybrid", textcolor=color.white)
+plotshape(plot_ib_short, title="IB Short", style=shape.triangledown, location=location.abovebar, color=color.green, size=size.small, text="IB\nHybrid", textcolor=color.white)
+
+// Alert
+alertcondition(asia_long_cond or asia_short_cond or ib_long_cond or ib_short_cond, title="Hybrid Signal", message="Titan Hybrid Signal Detected")
