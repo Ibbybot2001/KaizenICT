@@ -1,0 +1,24 @@
+{
+    "strategy_name": "TITAN_ONL_SNIPER",
+    "version": "1.0",
+    "last_updated": "2026-01-19",
+    "params": {
+        "pools": [
+            "ONL"
+        ],
+        "direction": "LONG",
+        "disp_threshold": 0.5,
+        "session_start_hour": 9,
+        "session_start_min": 30,
+        "session_end_hour": 12,
+        "session_end_min": 0,
+        "sl_buffer": 5.0,
+        "max_trades": 3,
+        "require_disp": true
+    },
+    "risk": {
+        "max_daily_loss_usd": 500,
+        "max_consecutive_losses": 2,
+        "contracts": 1
+    }
+}

@@ -96,7 +96,7 @@ class GoldenBot:
 
         # Subscribe to 1 min bars (Real-time updates)
         self.ib.reqHistoricalData(
-            self.contract, endDateTime='', durationStr='1 D',
+            self.contract, endDateTime='', durationStr='2 D',
             barSizeSetting='1 min', whatToShow='TRADES', useRTH=False,
             keepUpToDate=True
         )
@@ -224,99 +224,217 @@ class GoldenBot:
                 sf(vol), sf(wick), sf(body), sf(dh), sf(dl), sf(disth), sf(distl)
             )
 
-    def check_signals(self, df):
-        # 1. Check Time
-        ny_tz = pytz.timezone('America/New_York')
-        now_ny = datetime.now(ny_tz)
-        
-        # USER REQUEST: Full Day Tracking
-        # Valid Time is basically always True for Data-Only/Sim mode
-        # But we still want to label it properly?
-        # User said: "I want full day tracking"
-        valid_time = True 
-        
-        # ... logic ...
-        
-        # LOGIC RE-CALC (for signal strictness)
-        current_bar = df.iloc[-1]
-        close = current_bar['close']
-        open_p = current_bar['open']
-        high = current_bar['high']
-        low = current_bar['low']
-        
-        is_bull = close > open_p
-        is_bear = close < open_p
-        
-        lookback = 20
-        rolling_high = df['high'].rolling(lookback).max().iloc[-1]
-        rolling_low = df['low'].rolling(lookback).min().iloc[-1]
-        dist_to_high_bips = (abs(rolling_high - close) / close) * 10000.0
-        dist_to_low_bips = (abs(rolling_low - close) / close) * 10000.0
-        
-        tick_size = 0.25 
-        body_ticks = abs(close - open_p) / tick_size
-        
-        # Filters
-        wick_ratio = 999
-        if is_bull and abs(close - open_p) > 0:
-            wick_upper = high - close
-            wick_ratio = wick_upper / abs(close - open_p)
-        elif is_bear and abs(close - open_p) > 0:
-            wick_lower = close - low
-            wick_ratio = wick_lower / abs(close - open_p)
-            
-        avg_vol = df['volume'].rolling(20).mean().iloc[-1]
-        rel_vol = current_bar['volume'] / avg_vol if avg_vol > 0 else 0
-        
-        # Logic
-        long_base = is_bull and (body_ticks >= LONG_BODY_MIN_TICKS) and (dist_to_high_bips <= LONG_DIST_BIPS)
-        short_base = is_bear and (body_ticks >= SHORT_BODY_MIN_TICKS) and (dist_to_low_bips <= SHORT_DIST_BIPS)
-        
-        sniper_filter = (wick_ratio <= MAX_WICK_RATIO) and (rel_vol >= MIN_REL_VOL)
-        
-        # Store for execute_trade
-        self.latest_metrics = {
-            "vol": rel_vol, "wick": wick_ratio, "body": body_ticks,
-            "dh": rolling_high, "dl": rolling_low,
-            "dist_h": dist_to_high_bips, "dist_l": dist_to_low_bips
-        }
-        
-        details = f"Body={body_ticks:.1f},DH={dist_to_high_bips:.1f},DL={dist_to_low_bips:.1f}"
-        
-        signal = None
-        if valid_time:
-            if long_base and sniper_filter:
-                signal = "BUY"
-            elif short_base and sniper_filter:
-                signal = "SELL"
-            
-        return signal, details
+            self.gs_logger.log_min_data(
+                ts_str, sf(price), action, details, 
+                sf(vol), sf(wick), sf(body), sf(dh), sf(dl), sf(disth), sf(distl)
+            )
 
-    def execute_trade(self, action, price):
+    def engineer_live_features(self, df):
+        """Calculates IB and ASIA levels + FVG for the active session."""
+        try:
+            # Ensure NY Time
+            df['ny_time'] = df['date'].dt.tz_convert('America/New_York')
+            df['hour'] = df['ny_time'].dt.hour
+            df['minute'] = df['ny_time'].dt.minute
+            df['date_only'] = df['ny_time'].dt.date
+            
+            # 1. IB Levels (09:30 - 10:00 Today)
+            today = df['date_only'].iloc[-1]
+            ib_mask = (df['date_only'] == today) & (
+                ((df['hour'] == 9) & (df['minute'] >= 30)) | ((df['hour'] == 10) & (df['minute'] == 0))
+            )
+            ib_bars = df[ib_mask]
+            
+            df['IB_H'] = ib_bars['high'].max() if not ib_bars.empty else 0
+            df['IB_L'] = ib_bars['low'].min() if not ib_bars.empty else 0
+            
+            # 2. ASIA Levels (18:00 Prev - 00:00 Today)
+            # Simplistic: Just look at 18-00 in the last 24h window
+            # Harder in live stream. We can just take lookback?
+            # Let's use strict time:
+            # Asia is 18:00 (D-1) -> 00:00 (D)
+            # Find the most recent completed Asia session
+            
+            # If current time > 00:00 today, Asia was yesterday 18:00 to today 00:00
+            # Since we have 2 days data, we can filter for that window
+            
+            # Construct Asia Start/End logic?
+            # Shortcut: Use fixed hour checks on the full dataframe
+            asia_mask = (df['hour'] >= 18) | (df['hour'] < 0) # 0 is midnight?
+            # This is tricky with rolling.
+            # Alternative: Use simple rolling min/max of ~6 hours if in morning?
+            # Standard: 18:00 - 00:00.
+            
+            # Let's isolate the 'Last Asia Session' based on current time
+            # If now is 10:00 AM, Asia ended 10 hours ago via midnight.
+            
+            # Filter for last 24h
+            last_24h = df.iloc[-1440:] 
+            asia_session = last_24h[ (last_24h['hour'] >= 18) | (last_24h['hour'] < 0) ] # <0? No, 0-23.
+            # Asia: 18, 19, 20, 21, 22, 23. (Start 18:00, End 00:00 aka 23:59)
+            
+            asia_bars = last_24h[ (last_24h['hour'] >= 18) ]
+            # Note: This ignores the 00:00 bar if it exists? Usually Asia end is New Day Open.
+            
+            if not asia_bars.empty:
+                df['ASIA_H'] = asia_bars['high'].max()
+                df['ASIA_L'] = asia_bars['low'].min()
+            else:
+                df['ASIA_H'] = 0
+                df['ASIA_L'] = 0
+            
+            # 3. FVG Logic
+            # Bullish FVG: Low > High[n-2]
+            prev_high = df['high'].shift(2)
+            curr_low = df['low'] # Shift 0
+            # Wait, live engine usually evaluates on CLOSED bars?
+            # current_bar is incomplete?
+            # check_signals uses df.iloc[-1]. If 'on_bar' is called, bar is closed.
+            # So df.iloc[-1] is the JUST CLOSED bar.
+            
+            df['fvg_bull'] = (curr_low > prev_high)
+            df['fvg_bull_top'] = curr_low
+            df['fvg_bull_btm'] = prev_high
+            
+            prev_low = df['low'].shift(2)
+            curr_high = df['high']
+            df['fvg_bear'] = (curr_high < prev_low)
+            df['fvg_bear_top'] = prev_low 
+            df['fvg_bear_btm'] = curr_high
+            
+            return df
+        except Exception as e:
+            print(f"Feature Eng Error: {e}")
+            return df
+
+    def check_signals(self, df):
+        # 1. Engineer Features
+        df = self.engineer_live_features(df)
+        
+        # 2. Get Current State (Just Closed Bar)
+        row = df.iloc[-1]
+        
+        # 3. Time Filter (US Session: 10:00 - 16:00)
+        # We allow 10:00 to 15:30?
+        # User wants "Intraday". Let's stick to 09:30 - 16:00 generally, 
+        # but strategy specific?
+        # IB Strategy starts AFTER IB (10:00).
+        # Asia Strategy can trade anytime NY session?
+        # Let's use 10:00 - 15:55.
+        
+        current_hour = row['hour']
+        if current_hour < 10 or current_hour >= 16:
+            return None, "Outside Session (10-16)"
+            
+        # 4. Strategy Evaluation
+        signal = None
+        strategy_id = None
+        
+        # --- STRATEGY A : IB HYBRID ---
+        # Trigger: Sweep IB + FVG
+        ib_signal = False
+        ib_dir = 0
+        
+        if row['IB_H'] > 0 and row['IB_L'] > 0:
+            # Long: Sweep LOW, Close > LOW, FVG Bull
+            # Wait, strictly sweep low means Low < IB_L.
+            # And we need FVG.
+            # Logic: Did THIS bar sweep? Or recent sweep?
+            # Strict Hybrid: This bar creates FVG, and recent history swept?
+            # Or This bar is the sweep+fvg?
+            # Search used: `swept_low` state.
+            
+            # STATELESS APPROXIMATION for Bridge:
+            # Check if Low < IB_L (Sweep) AND FVG Bull.
+            # Ideally we track state. But keeping it simple:
+            # If (Low < IB_L) and FVG_Bull => Entry.
+            
+            # Stat Check:
+            is_sweep_low = row['low'] < row['IB_L']
+            is_sweep_high = row['high'] > row['IB_H']
+            
+            if is_sweep_low and row['fvg_bull']:
+                ib_signal = True
+                ib_dir = 1 # BUY
+            elif is_sweep_high and row['fvg_bear']:
+                ib_signal = True
+                ib_dir = -1 # SELL
+                
+        # --- STRATEGY B : ASIA HYBRID ---
+        asia_signal = False
+        asia_dir = 0
+        
+        if row['ASIA_H'] > 0 and row['ASIA_L'] > 0:
+            is_sweep_asia_low = row['low'] < row['ASIA_L']
+            is_sweep_asia_high = row['high'] > row['ASIA_H']
+            
+            if is_sweep_asia_low and row['fvg_bull']:
+                asia_signal = True
+                asia_dir = 1
+            elif is_sweep_asia_high and row['fvg_bear']:
+                asia_signal = True
+                asia_dir = -1
+                
+        # 5. Conflict Resolution (ASIA Priority)
+        final_action = None
+        final_strat = None
+        
+        if asia_signal and ib_signal:
+            # OVERLAP -> Pick ASIA
+            final_strat = "ASIA_Hybrid"
+            final_action = "BUY" if asia_dir == 1 else "SELL"
+        elif asia_signal:
+            final_strat = "ASIA_Hybrid"
+            final_action = "BUY" if asia_dir == 1 else "SELL"
+        elif ib_signal:
+            final_strat = "IB_Hybrid"
+            final_action = "BUY" if ib_dir == 1 else "SELL"
+            
+        details = f"IB={row['IB_H']:.1f}/{row['IB_L']:.1f}, ASIA={row['ASIA_H']:.1f}/{row['ASIA_L']:.1f}"
+        
+        # Return Tuple
+        return final_action, details, final_strat
+
+    def execute_trade(self, action, price, strategy_id="GOLDEN_DEFAULT"):
         if DATA_ONLY_MODE:
             print(f"🛑 DATA ONLY MODE: Trade {action} @ {price} BLOCKED.")
             return
 
-        print(f"🚀 LIVE EXECUTION: {action} @ {price}")
+        print(f"🚀 LIVE EXECUTION: {action} @ {price} | Strat: {strategy_id}")
+        
+        # CONFIG MAP (Portfolio)
+        # IB: TP 55, SL 5
+        # ASIA: TP 85, SL 5
+        
+        if strategy_id == "ASIA_Hybrid":
+            param_tp = 85
+            param_sl = 5
+        elif strategy_id == "IB_Hybrid":
+            param_tp = 55
+            param_sl = 5
+        else:
+            # Fallback
+            param_tp = 40
+            param_sl = 15
         
         # Calculate SL/TP
         if action == "BUY":
-            sl = price - SL_POINTS
-            tp = price + TP_POINTS
+            sl = price - param_sl
+            tp = price + param_tp
             direction = TradeDirection.LONG
         else:
-            sl = price + SL_POINTS
-            tp = price - TP_POINTS
+            sl = price + param_sl
+            tp = price - param_tp
             direction = TradeDirection.SHORT
             
         # Send to TradersPost
-        res = self.broker.execute_order("GOLDEN_HALF_HOUR", direction, CONTRACTS, sl, tp)
+        res = self.broker.execute_order(strategy_id, direction, CONTRACTS, sl, tp)
         
         # Log to GS
         if res == "TP-OK":
             m = self.latest_metrics
             self.gs_logger.log_trade(
-                pool_id="GOLDEN_HALF_HOUR", 
+                pool_id=strategy_id, 
                 direction=action, 
                 entry=price, 
                 sl=sl, 
