@@ -26,7 +26,10 @@ logs/
 .vscode/
 .kanbn/
 
-# Bot Identity
+# Credentials & Temp State
+service_account.json
+bridge_stats.json
+live_dashboard.json
+bot_identity.json
 bot_key
 bot_key.pub
-bot_identity.json
