@@ -100,12 +100,14 @@ def engineer_pools(df_bars):
     mask_asia = (df['hour'] >= 0) & (df['hour'] < 3)
     mask_london = (df['hour'] >= 3) & ((df['hour'] < 9) | ((df['hour'] == 9) & (df['minute'] < 30)))
     mask_overnight = (df['hour'] < 9) | ((df['hour'] == 9) & (df['minute'] < 30))
+    mask_ib = (df['hour'] == 9) & (df['minute'] >= 30) # 09:30 - 10:00 Initial Balance
     mask_lunch = ((df['hour'] == 11) & (df['minute'] >= 30)) | (df['hour'] == 12) | ((df['hour'] == 13) & (df['minute'] < 30))
     
     # Compute session H/L
     asia_hl = df[mask_asia].groupby('date').agg(ASIA_H=('high', 'max'), ASIA_L=('low', 'min'))
     london_hl = df[mask_london].groupby('date').agg(LON_H=('high', 'max'), LON_L=('low', 'min'))
     overnight_hl = df[mask_overnight].groupby('date').agg(ONH=('high', 'max'), ONL=('low', 'min'))
+    ib_hl = df[mask_ib].groupby('date').agg(IB_H=('high', 'max'), IB_L=('low', 'min'))
     lunch_hl = df[mask_lunch].groupby('date').agg(LUNCH_H=('high', 'max'), LUNCH_L=('low', 'min'))
     
     # PDH/PDL (Previous Day)
@@ -116,6 +118,7 @@ def engineer_pools(df_bars):
     df = df.merge(asia_hl, on='date', how='left')
     df = df.merge(london_hl, on='date', how='left')
     df = df.merge(overnight_hl, on='date', how='left')
+    df = df.merge(ib_hl, on='date', how='left')
     df = df.merge(lunch_hl, on='date', how='left')
     df = df.merge(daily_hl, on='date', how='left')
     
@@ -142,6 +145,7 @@ def detect_pj_signals(df_bars, tracker, current_date):
         ('ONH', 'ONL', 'ONH', 'ONL'),
         ('ASIA_H', 'ASIA_L', 'ASIA_H', 'ASIA_L'),
         ('LON_H', 'LON_L', 'LON_H', 'LON_L'),
+        ('IB_H', 'IB_L', 'IB_H', 'IB_L'),
         ('LUNCH_H', 'LUNCH_L', 'LUNCH_H', 'LUNCH_L'),
     ]
     
