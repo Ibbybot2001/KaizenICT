@@ -44,11 +44,12 @@ TEST_MONTHS = [9, 10, 11, 12]
 # PARAM SPACE
 POOLS = [
     ['IB_L', 'IB_H'],
+    ['ONL', 'ONH'],
     ['IB_L', 'IB_H', 'ONL', 'ONH'],
     ['PDL', 'PDH']
 ]
-TP_TARGETS = [30, 50, 80]
-SL_BUFFERS = [5.0, 10.0] # Below swing point
+TP_TARGETS = [20, 30, 40, 50, 60, 80, 100]
+SL_BUFFERS = [3.0, 5.0, 8.0, 10.0, 12.0, 15.0]
 MAX_TRADES = [2]
 
 # ==============================================================================
