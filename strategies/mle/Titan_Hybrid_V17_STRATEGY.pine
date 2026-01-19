@@ -112,17 +112,24 @@ if asia_active
         swept_asia_h := true
 
 // -------------------------------------------------------------------------
+// TREND FILTER (SMA 200)
+// -------------------------------------------------------------------------
+sma200 = ta.sma(close, 200)
+trend_ok_long  = close > sma200
+trend_ok_short = close < sma200
+
+// -------------------------------------------------------------------------
 // 4. SIGNAL GENERATION
 // -------------------------------------------------------------------------
 // Valid Trade Window: 10:00 AM - 15:55 PM
 valid_window = not na(time(timeframe.period, "1000-1555", tz))
 
-// Logic Matches Research (Stateful Sweep + FVG)
-ib_long  = ib_active and valid_window and swept_ib_l and fvg_bull
-ib_short = ib_active and valid_window and swept_ib_h and fvg_bear
+// Logic Matches Research (Stateful Sweep + FVG + Trend)
+ib_long  = ib_active and valid_window and swept_ib_l and fvg_bull and trend_ok_long
+ib_short = ib_active and valid_window and swept_ib_h and fvg_bear and trend_ok_short
 
-asia_long  = asia_active and valid_window and swept_asia_l and fvg_bull
-asia_short = asia_active and valid_window and swept_asia_h and fvg_bear
+asia_long  = asia_active and valid_window and swept_asia_l and fvg_bull and trend_ok_long
+asia_short = asia_active and valid_window and swept_asia_h and fvg_bear and trend_ok_short
 
 // -------------------------------------------------------------------------
 // 5. STRATEGY EXECUTION (PRIORITY: ASIA)

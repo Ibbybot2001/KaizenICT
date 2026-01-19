@@ -322,6 +322,9 @@ class GoldenBot:
             df['fvg_bear_top'] = prev_low 
             df['fvg_bear_btm'] = curr_high
             
+            # 4. TREND FILTER (SMA 200)
+            df['SMA_200'] = df['close'].rolling(window=200).mean()
+            
             return df
         except Exception as e:
             print(f"Feature Eng Error: {e}")
@@ -374,11 +377,15 @@ class GoldenBot:
             if row['low'] < row['IB_L']: self.swept_ib_low = True
             if row['high'] > row['IB_H']: self.swept_ib_high = True
             
-            # Check Trigger (Memory + FVG)
-            if self.swept_ib_low and row['fvg_bull']:
+            # Check Trigger (Memory + FVG + Trend)
+            # Trend Rules: Long > SMA, Short < SMA
+            trend_ok_long = row['close'] > row['SMA_200'] if pd.notna(row['SMA_200']) else True
+            trend_ok_short = row['close'] < row['SMA_200'] if pd.notna(row['SMA_200']) else True
+            
+            if self.swept_ib_low and row['fvg_bull'] and trend_ok_long:
                 ib_signal = True
                 ib_dir = 1 # BUY
-            elif self.swept_ib_high and row['fvg_bear']:
+            elif self.swept_ib_high and row['fvg_bear'] and trend_ok_short:
                 ib_signal = True
                 ib_dir = -1 # SELL
                 
@@ -391,11 +398,15 @@ class GoldenBot:
             if row['low'] < row['ASIA_L']: self.swept_asia_low = True
             if row['high'] > row['ASIA_H']: self.swept_asia_high = True
             
+            # Trend Check (Recalculate or reuse)
+            trend_ok_long = row['close'] > row['SMA_200'] if pd.notna(row['SMA_200']) else True
+            trend_ok_short = row['close'] < row['SMA_200'] if pd.notna(row['SMA_200']) else True
+
             # Check Trigger
-            if self.swept_asia_low and row['fvg_bull']:
+            if self.swept_asia_low and row['fvg_bull'] and trend_ok_long:
                 asia_signal = True
                 asia_dir = 1
-            elif self.swept_asia_high and row['fvg_bear']:
+            elif self.swept_asia_high and row['fvg_bear'] and trend_ok_short:
                 asia_signal = True
                 asia_dir = -1
                 
