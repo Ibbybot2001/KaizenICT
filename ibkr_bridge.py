@@ -42,8 +42,11 @@ MIN_REL_VOL = 1.5
 # Session (NY Time)
 START_HOUR = 9
 START_MINUTE = 30
-END_HOUR = 10
-END_MINUTE = 00
+END_HOUR = 15
+END_MINUTE = 55
+
+# Safety Limit (Matched to Research)
+MAX_DAILY_TRADES = 2
 
 class GoldenBot:
     def __init__(self):
@@ -65,6 +68,16 @@ class GoldenBot:
         
         # Fidelity Tracking
         self.ibkr_tick_count = 0
+        
+        # Trade Limiter
+        self.daily_trade_count = 0
+        self.last_trade_day = None
+        
+        # Stateful Sweep Flags (Persist until reset)
+        self.swept_ib_low = False
+        self.swept_ib_high = False
+        self.swept_asia_low = False
+        self.swept_asia_high = False
         
         # Init CSV if not exists
         if not os.path.exists(self.csv_file):
@@ -134,8 +147,15 @@ class GoldenBot:
         # The Live Engine is the sole authority for 1-minute bars and logic.
         if has_new_bar:
             print(f"[{datetime.now().strftime('%H:%M:%S')}] IBKR Bar Closed: {last_bar.close}")
-            # The engine handles rich logging to Google Sheets to avoid 1Hz conflict
-            pass
+            
+            # --- CRITICAL: EXECUTE STRATEGY ---
+            try:
+                action, details, strat_id = self.check_signals(self.df)
+                if action:
+                    self.execute_trade(action, last_bar.close, strat_id)
+            except Exception as e:
+                print(f"Signal Check Error: {e}")
+            # ----------------------------------
 
     async def heartbeat_loop(self):
         """Ensures a gapless 1Hz data stream even when market is quiet."""
@@ -322,41 +342,43 @@ class GoldenBot:
         # Asia Strategy can trade anytime NY session?
         # Let's use 10:00 - 15:55.
         
-        current_hour = row['hour']
         if current_hour < 10 or current_hour >= 16:
-            return None, "Outside Session (10-16)"
+            return None, "Outside Session (10-16)", None
+            
+        # Trade Limiter & State Reset
+        today_date = row['date_only']
+        if self.last_trade_day != today_date:
+            self.daily_trade_count = 0 # Reset for new day
+            self.last_trade_day = today_date
+            # Reset Sweep Flags for new day
+            self.swept_ib_low = False
+            self.swept_ib_high = False
+            self.swept_asia_low = False
+            self.swept_asia_high = False
+            
+        if self.daily_trade_count >= MAX_DAILY_TRADES:
+            return None, f"Max Trades Reached ({self.daily_trade_count}/{MAX_DAILY_TRADES})", None
+
             
         # 4. Strategy Evaluation
         signal = None
         strategy_id = None
         
         # --- STRATEGY A : IB HYBRID ---
-        # Trigger: Sweep IB + FVG
+        # Trigger: Sweep IB + FVG (Stateful)
         ib_signal = False
         ib_dir = 0
         
         if row['IB_H'] > 0 and row['IB_L'] > 0:
-            # Long: Sweep LOW, Close > LOW, FVG Bull
-            # Wait, strictly sweep low means Low < IB_L.
-            # And we need FVG.
-            # Logic: Did THIS bar sweep? Or recent sweep?
-            # Strict Hybrid: This bar creates FVG, and recent history swept?
-            # Or This bar is the sweep+fvg?
-            # Search used: `swept_low` state.
+            # Update State
+            if row['low'] < row['IB_L']: self.swept_ib_low = True
+            if row['high'] > row['IB_H']: self.swept_ib_high = True
             
-            # STATELESS APPROXIMATION for Bridge:
-            # Check if Low < IB_L (Sweep) AND FVG Bull.
-            # Ideally we track state. But keeping it simple:
-            # If (Low < IB_L) and FVG_Bull => Entry.
-            
-            # Stat Check:
-            is_sweep_low = row['low'] < row['IB_L']
-            is_sweep_high = row['high'] > row['IB_H']
-            
-            if is_sweep_low and row['fvg_bull']:
+            # Check Trigger (Memory + FVG)
+            if self.swept_ib_low and row['fvg_bull']:
                 ib_signal = True
                 ib_dir = 1 # BUY
-            elif is_sweep_high and row['fvg_bear']:
+            elif self.swept_ib_high and row['fvg_bear']:
                 ib_signal = True
                 ib_dir = -1 # SELL
                 
@@ -365,13 +387,15 @@ class GoldenBot:
         asia_dir = 0
         
         if row['ASIA_H'] > 0 and row['ASIA_L'] > 0:
-            is_sweep_asia_low = row['low'] < row['ASIA_L']
-            is_sweep_asia_high = row['high'] > row['ASIA_H']
+            # Update State
+            if row['low'] < row['ASIA_L']: self.swept_asia_low = True
+            if row['high'] > row['ASIA_H']: self.swept_asia_high = True
             
-            if is_sweep_asia_low and row['fvg_bull']:
+            # Check Trigger
+            if self.swept_asia_low and row['fvg_bull']:
                 asia_signal = True
                 asia_dir = 1
-            elif is_sweep_asia_high and row['fvg_bear']:
+            elif self.swept_asia_high and row['fvg_bear']:
                 asia_signal = True
                 asia_dir = -1
                 
@@ -429,6 +453,11 @@ class GoldenBot:
             
         # Send to TradersPost
         res = self.broker.execute_order(strategy_id, direction, CONTRACTS, sl, tp)
+        
+        # Increment Daily Count on Success
+        if res == "TP-OK":
+            self.daily_trade_count += 1
+            print(f"✅ Trade Count: {self.daily_trade_count}/{MAX_DAILY_TRADES}")
         
         # Log to GS
         if res == "TP-OK":
