@@ -1,0 +1,134 @@
+//@version=5
+indicator("Titan Hybrid Portfolio V17 [Antigravity]", overlay=true, max_lines_count=500, max_labels_count=500)
+
+// -------------------------------------------------------------------------
+// CONFIGURATION
+// -------------------------------------------------------------------------
+show_ib   = input(true, "Show Initial Balance (IB)")
+show_asia = input(true, "Show Asia Session")
+show_fvg  = input(true, "Show FVG Entries")
+
+// Timezone: New York is critical for alignment with Python Bridge
+tz = "America/New_York"
+
+// -------------------------------------------------------------------------
+// 1. INITIAL BALANCE (IB) LOGIC
+//    Window: 09:30 - 10:00 AM NY
+// -------------------------------------------------------------------------
+var float ib_h = na
+var float ib_l = na
+var bool ib_active = false
+
+// Detect IB Session
+is_ib_session = not na(time(timeframe.period, "0930-1000", tz))
+is_new_day    = ta.change(time("D"))
+
+if is_new_day
+    ib_h := na
+    ib_l := na
+    ib_active := false
+
+if is_ib_session
+    // Track High/Low during the window
+    ib_h := na(ib_h) ? high : math.max(ib_h, high)
+    ib_l := na(ib_l) ? low : math.min(ib_l, low)
+else
+    // Session Done -> Levels are Active
+    if not na(ib_h)
+        ib_active := true
+
+// Plot IB Levels (Green)
+// Only show if active and within US Session (until 16:00)
+is_us_session = not na(time(timeframe.period, "0930-1600", tz))
+plot(show_ib and is_us_session and ib_active ? ib_h : na, "IB High", color=color.new(color.green, 50), style=plot.style_linebr)
+plot(show_ib and is_us_session and ib_active ? ib_l : na, "IB Low", color=color.new(color.green, 50), style=plot.style_linebr)
+
+// -------------------------------------------------------------------------
+// 2. ASIA SESSION LOGIC
+//    Window: 18:00 (Prev) - 00:00 (Curr) NY
+// -------------------------------------------------------------------------
+var float asia_h = na
+var float asia_l = na
+var bool asia_active = false
+
+// Detect ASIA Session (18:00 - 00:00)
+// Note: In Pine, "1800-0000".
+is_asia_session = not na(time(timeframe.period, "1800-0000", tz))
+
+if is_asia_session
+    // Reset if this is the START of Asia (18:00)
+    // Simple check: if we were NOT in asia last bar, reset
+    if not is_asia_session[1]
+        asia_h := high
+        asia_l := low
+    else
+        asia_h := math.max(asia_h, high)
+        asia_l := math.min(asia_l, low)
+    asia_active := true
+else
+    // Outside Asia
+    pass
+
+// Plot ASIA Levels (Blue)
+// Show all day until reset
+plot(show_asia and asia_active ? asia_h : na, "Asia High", color=color.new(color.blue, 50), style=plot.style_linebr)
+plot(show_asia and asia_active ? asia_l : na, "Asia Low", color=color.new(color.blue, 50), style=plot.style_linebr)
+
+// -------------------------------------------------------------------------
+// 3. FVG ENGINE
+// -------------------------------------------------------------------------
+fvg_bull = low > high[2]
+fvg_bear = high < low[2]
+
+// -------------------------------------------------------------------------
+// 4. SIGNAL GENERATION (HYBRID)
+// -------------------------------------------------------------------------
+
+// A. IB Signals
+// Long: Low swept IB_L, then Bullish FVG
+// Stateless logic (like Bridge): simple check if Close is back inside or FVG validates the sweep
+// Python Bridge Logic: "if is_sweep_low and row['fvg_bull']"
+// is_sweep_low means `low < ib_l`.
+
+ib_long_cond  = ib_active and is_us_session and (low < ib_l) and fvg_bull
+ib_short_cond = ib_active and is_us_session and (high > ib_h) and fvg_bear
+
+// B. ASIA Signals
+asia_long_cond  = asia_active and is_us_session and (low < asia_l) and fvg_bull
+asia_short_cond = asia_active and is_us_session and (high > asia_h) and fvg_bear
+
+// C. Conflict Resolution (Priority)
+// If both, we label as ASIA (since it's the priority)
+// But for visual, we can just plot them distinct or combined.
+
+signal_long = false
+signal_short = false
+label_txt = ""
+label_col = color.gray
+
+if asia_long_cond
+    signal_long := true
+    label_txt := "ASIA\nHybrid"
+    label_col := color.blue
+else if ib_long_cond
+    signal_long := true
+    label_txt := "IB\nHybrid"
+    label_col := color.green
+
+if asia_short_cond
+    signal_short := true
+    label_txt := "ASIA\nHybrid"
+    label_col := color.blue
+else if ib_short_cond
+    signal_short := true
+    label_txt := "IB\nHybrid"
+    label_col := color.green
+
+// -------------------------------------------------------------------------
+// 5. PLOTTING
+// -------------------------------------------------------------------------
+plotshape(signal_long, title="Long", style=shape.triangleup, location=location.belowbar, color=label_col, size=size.small, text=label_txt, textcolor=color.white)
+plotshape(signal_short, title="Short", style=shape.triangledown, location=location.abovebar, color=label_col, size=size.small, text=label_txt, textcolor=color.white)
+
+// Add Alert Hook (Optional)
+alertcondition(signal_long or signal_short, title="Hybrid Signal", message="Titan Hybrid Signal Detected")
