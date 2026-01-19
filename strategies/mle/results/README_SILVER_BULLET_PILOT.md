@@ -23,3 +23,8 @@ The strategy is "on the cusp" of profitability. We need a Directional Filter.
 2.  **Daily Bias**: Use `ONH`/`ONL` relationship to bias direction.
 
 **Next Step**: Add `SMA_Trend` filter to `titan_silver_bullet_search.py`.
+
+##  Update: Trend Filter Experiment
+- **Hypothesis**: Adding SMA 200/800 Filter will improve PF.
+- **Result**: **Failed**. PF remained ~0.94 or dropped.
+- **Conclusion**: Simple Trend Filtering is not the missing link. We need **Liquidity Context** (Sweeps).
