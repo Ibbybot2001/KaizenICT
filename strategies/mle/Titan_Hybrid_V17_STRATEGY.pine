@@ -121,20 +121,7 @@ if strategy.position_size == 0
 // So 55 Points = 220 Ticks.
 // I will adjust logic to strict price targets to be safe.
 
-if strategy.position_size > 0
-    // Long Exit
-    entry_p = strategy.position_avg_price
-    
-    // Determine which strategy (hack via comment or just apply specific logic)
-    // We used explicit exit IDs above, so strategy.exit SHOULD handle it.
-    // However, recreating exits on every bar is safer in some Pine versions or using distinct IDs.
-    // The above "Fire and Forget" in the entry block works IF the order is filled immediately.
-    // But limit orders? Here we use Market entries (strategy.entry default).
-    pass
-
-if strategy.position_size < 0
-    // Short Exit
-    pass
+// (Exits are handled by strategy.exit at entry time)
 
 // -------------------------------------------------------------------------
 // 6. FIX EXIT LOGIC (Re-Issue Exits for Safety)
