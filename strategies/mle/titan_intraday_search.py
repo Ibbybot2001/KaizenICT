@@ -56,18 +56,29 @@ MAX_TRADES_DAILY = [5] # Cap at 5 to encourage quality
 # ==============================================================================
 # WORKER
 # ==============================================================================
+# ==============================================================================
+# WORKER
+# ==============================================================================
+TRAIN_DF = None
+TEST_DF = None
+
+def init_worker(train_df, test_df):
+    global TRAIN_DF, TEST_DF
+    TRAIN_DF = train_df
+    TEST_DF = test_df
+
 def evaluate_params(args):
-    idx, params, train_bars, test_bars = args
+    idx, params = args # Data now in globals
     
     try:
         # TRAIN
-        train_res = run_backtest(train_bars, params)
-        if train_res['trades'] < 150: return None # Min Volume Filter (~1/day)
-        if train_res['pf'] < 1.1: return None    # Weak Edge
+        train_res = run_backtest(TRAIN_DF, params)
+        # if train_res['trades'] < 150: return None # FILTER DISABLED
+        # if train_res['pf'] < 1.1: return None    # FILTER DISABLED
         
         # TEST
-        test_res = run_backtest(test_bars, params)
-        if test_res['pf'] < 1.0: return None     # Failed Verification
+        test_res = run_backtest(TEST_DF, params)
+        # if test_res['pf'] < 1.0: return None     # FILTER DISABLED
         
         # RESULT
         result = {
@@ -88,17 +99,10 @@ def evaluate_params(args):
 
 def run_backtest(bars_df, params):
     # Setup
-    tester = PJBacktester(bars_df) # Ticks simulated from bars implicitly or passed? 
-    # NOTE: Phase16 engine usually needs tick data for PJBacktester, but here we use 
-    # simplified OHLC logic inside detect_pj_signals + manual simulation?
-    # Actually, detect_pj_signals returns SIGNALS, we need to simulate outcome.
-    # For speed, we simulate on 1-min bars here (Engine uses ticks, but Search uses approx).
+    # tester = PJBacktester(bars_df) 
     
-    dates = bars_df['date'].unique()
+    # dates = bars_df['date'].unique()
     trades = []
-    
-    # Pre-calculate signals? No, iterate days.
-    # Actually, we rely on the same logic as verify_power_trio.py for speed search
     
     # Fast iteration
     pools_active = set(params['pools'])
@@ -243,18 +247,20 @@ if __name__ == '__main__':
     # 3. RUN PARALLEL
     logger.info(f"Starting Search on {NUM_CORES} cores...")
     
-    work_items = [(i, c, train_df, test_df) for i, c in enumerate(combos)]
+    # Pass only (i, c)
+    work_items = [(i, c) for i, c in enumerate(combos)]
     print(f"Starting Search: {len(combos)} items. Check 'output/intraday_search/intraday_search.log' for progress.")
     
     results = []
-    with Pool(NUM_CORES) as pool:
-        # Use imap_unordered for streaming results (handled by evaluate_params returning None/Result)
+    
+    # Init worker with global data
+    with Pool(NUM_CORES, initializer=init_worker, initargs=(train_df, test_df)) as pool:
         for res in pool.imap_unordered(evaluate_params, work_items):
             if res:
                 results.append(res)
-                logger.info(f"✅ FOUND: {res['params']} | PF: {res['test_pf']:.2f} | Trades: {res['test_trades']}")
+                logger.info(f"DATA: {res['params']} | PF: {res['test_pf']:.2f} | Trades: {res['test_trades']}")
                 # Auto-save every winner to CSV to avoid data loss
-                pd.DataFrame([res]).to_csv(OUTPUT_DIR / "intraday_winners.csv", mode='a', header=not (OUTPUT_DIR / "intraday_winners.csv").exists(), index=False)
+                pd.DataFrame([res]).to_csv(OUTPUT_DIR / "intraday_results_raw.csv", mode='a', header=not (OUTPUT_DIR / "intraday_results_raw.csv").exists(), index=False)
     
     logger.info("Search Complete.")
     print("Search Complete.")
