@@ -134,24 +134,28 @@ asia_short = asia_active and valid_window and swept_asia_h and fvg_bear
 
 // Directional State
 // We only open one trade at a time to keep it simple and match Python default
+// RESEARCH ALIGNMENT: Use LIMIT orders at the FVG creation level (Retrace Entry).
+// Python Research: Entry = Curr_Low (Bull) or Curr_High (Bear).
+// This requires price to 'wick back' to the level.
+
 if strategy.position_size == 0 and daily_trades < max_trades
     if asia_long
-        strategy.entry("ASIA_Buy", strategy.long, comment="ASIA Hybrid")
+        strategy.entry("ASIA_Buy", strategy.long, comment="ASIA Hybrid", limit=low)
         strategy.exit("Exit_ASIA", "ASIA_Buy", profit=pt_points_asia*4, loss=sl_points_asia*4)
         daily_trades += 1
         
     else if asia_short
-        strategy.entry("ASIA_Sell", strategy.short, comment="ASIA Hybrid")
+        strategy.entry("ASIA_Sell", strategy.short, comment="ASIA Hybrid", limit=high)
         strategy.exit("Exit_ASIA", "ASIA_Sell", profit=pt_points_asia*4, loss=sl_points_asia*4)
         daily_trades += 1
         
     else if ib_long
-        strategy.entry("IB_Buy", strategy.long, comment="IB Hybrid")
+        strategy.entry("IB_Buy", strategy.long, comment="IB Hybrid", limit=low)
         strategy.exit("Exit_IB", "IB_Buy", profit=pt_points_ib*4, loss=sl_points_ib*4)
         daily_trades += 1
 
     else if ib_short
-        strategy.entry("IB_Sell", strategy.short, comment="IB Hybrid")
+        strategy.entry("IB_Sell", strategy.short, comment="IB Hybrid", limit=high)
         strategy.exit("Exit_IB", "IB_Sell", profit=pt_points_ib*4, loss=sl_points_ib*4)
         daily_trades += 1
 
