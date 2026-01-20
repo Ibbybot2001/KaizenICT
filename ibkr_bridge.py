@@ -29,7 +29,7 @@ TRUST_SIGNALS_MODE = True # User uses TradersPost; Local IBKR API may not see th
 # Risk
 SL_POINTS = 5       # Sniper Precision (BH Closed)
 TP_POINTS = 40      # Target (1:8 R:R)
-CONTRACTS = 1
+CONTRACTS = 2
 
 # Triggers
 LONG_BODY_MIN_TICKS = 5.0
@@ -48,7 +48,7 @@ END_HOUR = 23
 END_MINUTE = 59
 
 # Safety Limit (Matched to Research)
-MAX_DAILY_TRADES = 999 # UNLOCKED (High-Density Growth Mode)
+MAX_DAILY_TRADES = 99 # Uncapped for Holy Grail Strategy
 
 class GoldenBot:
     def __init__(self):
@@ -317,29 +317,9 @@ class GoldenBot:
                         pass 
                     else:
                         print(f"📉 EXIT DETECTED: Position confirmed closed after {self.empty_pos_count} polls.")
-                        # Grab trade details into local variables
-                        trade_to_close = self.current_trade
-                        if trade_to_close and trade_to_close.get('gs_row'):
-                            row_idx = trade_to_close['gs_row']
-                            strat_id = trade_to_close['strat']
-                            entry_px = trade_to_close['entry']
-                            side = trade_to_close['direction']
-                            
-                            exit_price = self.last_known_price or 0
-                            pnl_pts = (exit_price - entry_px) if side == "BUY" else (entry_px - exit_price)
-                            
-                            self.gs_logger.update_trade_close(
-                                row_index=row_idx,
-                                exit_price=exit_price,
-                                pnl_pts=pnl_pts
-                            )
-                            self.log_audit_event(trade_to_close, exit_price, "CLOSED")
-                            print(f"✅ GS Updated: {strat_id} CLOSED (Row {row_idx}). PnL Pts: {pnl_pts:.2f}")
-                            
-                        # CRITICAL: Reset internal state
-                        self.current_trade = None
-                        self.in_position = False
-                        self.empty_pos_count = 0
+                        # Use the centralized exit logic
+                        exit_price = self.last_known_price or 0
+                        self.finalize_internal_exit(exit_price, "BROKER_CONFIRMED")
             except Exception as e:
                 print(f"Position Monitor Error: {e}")
 
@@ -403,12 +383,52 @@ class GoldenBot:
                 reason = "TAKE_PROFIT"
                 
         if breached:
-            # We don't close here (broker handles it), but we LOG the audit event
-            # Use a throttle or flag to avoid spamming the log
+            # We don't close here (broker handles it usually), but we LOG the audit event
             if not trade.get('audit_logged'):
-                print(f"⚠️ [AUDIT] Price touched {reason} level ({current_price:.1f}). Waiting for broker exit confirmation...")
+                print(f"⚠️ [AUDIT] Price touched {reason} level ({current_price:.1f}).")
                 trade['audit_logged'] = True
                 self.log_audit_event(trade, current_price, f"TOUCHED_{reason}")
+
+            # NEW: TRUST_SIGNALS_MODE decouple
+            if TRUST_SIGNALS_MODE:
+                print(f"🔓 TRUST_SIGNALS: Releasing internal lock due to {reason}.")
+                self.finalize_internal_exit(current_price, reason)
+            else:
+                 print("   ... Waiting for broker exit confirmation")
+
+    def finalize_internal_exit(self, exit_price, reason="CLOSED"):
+        """Forcefully closes the internal trade state and logs to GS."""
+        trade_to_close = self.current_trade
+        if not trade_to_close: return
+
+        try:
+            if trade_to_close.get('gs_row'):
+                row_idx = trade_to_close['gs_row']
+                strat_id = trade_to_close['strat']
+                entry_px = trade_to_close['entry']
+                side = trade_to_close['direction']
+                
+                pnl_pts = (exit_price - entry_px) if side == "BUY" else (entry_px - exit_price)
+                
+                if self.gs_logger.enabled:
+                    self.gs_logger.update_trade_close(
+                        row_index=row_idx,
+                        exit_price=exit_price,
+                        pnl_pts=pnl_pts
+                    )
+                
+                # Log audit if not already logged as CLOSED
+                self.log_audit_event(trade_to_close, exit_price, f"{reason}_FINAL")
+                print(f"✅ GS Updated: {strat_id} CLOSED (Row {row_idx}). PnL Pts: {pnl_pts:.2f}")
+
+        except Exception as e:
+            print(f"Finalize Exit Error: {e}")
+
+        # CRITICAL: Reset internal state
+        self.current_trade = None
+        self.in_position = False
+        self.empty_pos_count = 0
+        self.last_trade_time = time.time() # Reset cooldown timer
 
     def log_audit_event(self, trade, exit_px, status):
         """Logs trade lifecycle events to local CSV."""
@@ -544,10 +564,13 @@ class GoldenBot:
             # Body Ticks (Points for now)
             df['body_ticks'] = (df['close'] - df['open']).abs()
             
-            # Wick Ratio
+            # Wick Ratio (MUST MATCH BACKTEST: max_wick / range)
             df['range'] = (df['high'] - df['low']).replace(0, 1e-6)
             df['body'] = (df['close'] - df['open']).abs()
-            df['wick_ratio'] = (df['range'] - df['body']) / df['range']
+            df['upper_wick'] = df['high'] - df[['close', 'open']].max(axis=1)
+            df['lower_wick'] = df[['close', 'open']].min(axis=1) - df['low']
+            df['max_wick'] = df[['upper_wick', 'lower_wick']].max(axis=1)
+            df['wick_ratio'] = df['max_wick'] / df['range']
             
             # Relative Volume (10-bar avg)
             df['avg_vol'] = df['volume'].rolling(window=10).mean().replace(0, 1e-6)
