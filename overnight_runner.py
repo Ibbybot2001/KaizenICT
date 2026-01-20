@@ -45,6 +45,79 @@ USE_TICK_DATA = True  # Set to False for faster but less accurate testing
 MAX_RAM_GB = 30
 THROTTLE_RAM_GB = 25  # Start throttling at 25GB to stay safe
 
+# V5 Constants for Pure Tick Resolution
+POINT_VALUE = 20.0
+COMMISSION = 2.05
+SPREAD_SLIPPAGE = 1.0
+TRADE_TIMEOUT_SECONDS = 14400  # 4 hours max hold
+
+# ============================================================================
+# V5 TICK DATA FUNCTIONS
+# ============================================================================
+def load_tick_data():
+    """Load all tick parquet files for V5 Pure Tick outcome resolution."""
+    log("Loading Tick Data for V5 Pure Tick Resolution...")
+    tick_files = sorted(DATA_DIR.glob("*_clean_ticks.parquet"))
+    
+    if not tick_files:
+        log("WARNING: No tick data found! Falling back to bar-level resolution.")
+        return None
+    
+    dfs = []
+    for f in tick_files:
+        try:
+            df = pd.read_parquet(f)
+            df.columns = [c.lower().replace('<', '').replace('>', '') for c in df.columns]
+            dfs.append(df)
+            log(f"  Loaded {f.name}: {len(df):,} ticks")
+        except Exception as e:
+            log(f"  Error loading {f.name}: {e}")
+    
+    if not dfs:
+        return None
+        
+    tick_df = pd.concat(dfs).sort_index()
+    log(f"Tick Data Ready: {len(tick_df):,} total ticks")
+    return tick_df
+
+def resolve_outcome_ticks(tick_df, entry_time, entry_price, sl_pts, tp_pts, direction):
+    """
+    V5 PURE TICK RESOLUTION - Iterate through ticks to find which level hit first.
+    Returns: (outcome, pnl_points) where outcome is 'WIN', 'LOSS', or 'TIMEOUT'
+    """
+    try:
+        future_ticks = tick_df.loc[entry_time:].iloc[1:]
+    except:
+        return 'TIMEOUT', 0
+    
+    if len(future_ticks) == 0:
+        return 'TIMEOUT', 0
+    
+    sl_price = entry_price - sl_pts if direction == 'LONG' else entry_price + sl_pts
+    tp_price = entry_price + tp_pts if direction == 'LONG' else entry_price - tp_pts
+    
+    for tick_time, tick in future_ticks.iterrows():
+        price = tick.get('price', tick.get('last', None))
+        if price is None or pd.isna(price):
+            continue
+            
+        time_diff = (tick_time - entry_time).total_seconds()
+        if time_diff > TRADE_TIMEOUT_SECONDS:
+            return 'TIMEOUT', 0
+        
+        if direction == 'LONG':
+            if price >= tp_price:
+                return 'WIN', tp_pts
+            if price <= sl_price:
+                return 'LOSS', -sl_pts
+        else:
+            if price <= tp_price:
+                return 'WIN', tp_pts
+            if price >= sl_price:
+                return 'LOSS', -sl_pts
+    
+    return 'TIMEOUT', 0
+
 def check_ram_and_throttle():
     """Check RAM usage and throttle if approaching limit."""
     ram_used = psutil.Process().memory_info().rss / 1e9
@@ -161,215 +234,221 @@ def load_train_test_data():
     return train_df, test_df, train_months, test_months
 
 # ============================================================================
-# GPU GENETIC MINER (Simplified for Sessions)
+# V5 GPU GENETIC MINER WITH PURE TICK RESOLUTION
 # ============================================================================
 class SessionGeneticMiner:
-    def __init__(self, df, session_name, population_size=5000, generations=50):
+    def __init__(self, df, session_name, population_size=5000, generations=50, tick_df=None):
         self.session_name = session_name
         self.session_cfg = SESSIONS[session_name]
         self.pop_size = population_size
         self.generations = generations
-        self.valid_holds = [5, 10, 15, 30, 60, 120]  # Hold times in minutes
+        self.df = df
+        self.tick_df = tick_df  # V5: Tick data for precise SL/TP resolution
+        
+        # Constants
+        self.POINT_VALUE = POINT_VALUE
+        self.COMMISSION = COMMISSION
+        self.SPREAD_SLIPPAGE = SPREAD_SLIPPAGE
         
         # Prepare GPU tensors
         self._prepare_data(df)
         
     def _prepare_data(self, df):
-        """Convert DataFrame to GPU tensors."""
-        # Filter to session hours
-        df = train_df.copy()
+        """Convert DataFrame to GPU tensors with V5 fixes."""
+        df = df.copy()
         df['hour'] = pd.to_datetime(df.index).hour
         df['minute'] = pd.to_datetime(df.index).minute
         
-        self.closes = torch.tensor(df['close'].values, dtype=torch.float32, device=DEVICE)
-        self.highs = torch.tensor(df['high'].values, dtype=torch.float32, device=DEVICE)
-        self.lows = torch.tensor(df['low'].values, dtype=torch.float32, device=DEVICE)
-        self.hours = torch.tensor(df['hour'].values, dtype=torch.int32, device=DEVICE)
-        self.minutes = torch.tensor(df['minute'].values, dtype=torch.int32, device=DEVICE)
+        # Core tensors
+        self.close = torch.tensor(df['close'].values, dtype=torch.float32, device=DEVICE)
+        self.high = torch.tensor(df['high'].values, dtype=torch.float32, device=DEVICE)
+        self.low = torch.tensor(df['low'].values, dtype=torch.float32, device=DEVICE)
+        self.open = torch.tensor(df['open'].values, dtype=torch.float32, device=DEVICE)
         
-        # Pre-calculate returns for different hold times
-        self.hold_returns = {}
-        for h in self.valid_holds:
-            fut = torch.roll(self.closes, -h)
-            ret = fut - self.closes
-            ret[-h:] = 0
-            self.hold_returns[h] = ret
-            
+        # Indicators (pre-calculated in load_train_test_data)
+        self.sma = torch.tensor(df['sma200'].values, dtype=torch.float32, device=DEVICE)
+        self.liq_min = torch.tensor(df['roll_min'].values, dtype=torch.float32, device=DEVICE)
+        self.liq_max = torch.tensor(df['roll_max'].values, dtype=torch.float32, device=DEVICE)
+        
+        # Volume handling
+        if 'rel_vol' in df.columns:
+            self.rel_vol = torch.tensor(df['rel_vol'].values, dtype=torch.float32, device=DEVICE)
+        else:
+            self.rel_vol = torch.ones_like(self.close)
+        self.disable_vol = (self.rel_vol.max() == 0)
+        
+        # FVG (FIXED: NaN padding instead of circular shift)
+        nan_pad = torch.full((2,), float('nan'), device=DEVICE)
+        prev_high_2 = torch.cat([nan_pad, self.high[:-2]])
+        prev_low_2 = torch.cat([nan_pad, self.low[:-2]])
+        self.fvg_bull_gap = torch.nan_to_num(self.low - prev_high_2, nan=0.0)
+        self.fvg_bear_gap = torch.nan_to_num(prev_low_2 - self.high, nan=0.0)
+        
+        # Quality filters
+        self.body_size = torch.abs(self.close - self.open)
+        range_size = self.high - self.low
+        upper_wick = self.high - torch.max(self.close, self.open)
+        lower_wick = torch.min(self.close, self.open) - self.low
+        max_wick = torch.max(upper_wick, lower_wick)
+        self.wick_ratio = max_wick / (range_size + 1e-6)
+        
         # Session mask
+        hours = torch.tensor(df['hour'].values, dtype=torch.int32, device=DEVICE)
+        mins = torch.tensor(df['minute'].values, dtype=torch.int32, device=DEVICE)
         start_h, start_m = self.session_cfg['start']
         end_h, end_m = self.session_cfg['end']
-        
         start_mins = start_h * 60 + start_m
         end_mins = end_h * 60 + end_m
-        bar_mins = self.hours * 60 + self.minutes
+        bar_mins = hours * 60 + mins
         
         if start_mins < end_mins:
             self.session_mask = (bar_mins >= start_mins) & (bar_mins < end_mins)
-        else:  # Overnight session (e.g., Asia)
+        else:
             self.session_mask = (bar_mins >= start_mins) | (bar_mins < end_mins)
-            
-    def init_population(self):
-        """Create random strategy genomes."""
-        # Genome: [sl_pts, tp_pts, hold_idx, direction, body_filter, wick_filter]
-        sl = torch.randint(3, 15, (self.pop_size,), device=DEVICE)  # 3-15 pts SL
-        tp = torch.randint(10, 100, (self.pop_size,), device=DEVICE)  # 10-100 pts TP
-        hold_idx = torch.randint(0, len(self.valid_holds), (self.pop_size,), device=DEVICE)
-        direction = torch.randint(0, 2, (self.pop_size,), device=DEVICE) * 2 - 1  # -1 or 1
-        body_filter = torch.randint(0, 10, (self.pop_size,), device=DEVICE)  # Min body ticks
-        wick_filter = torch.randint(0, 50, (self.pop_size,), device=DEVICE)  # Max wick %
         
-        return torch.stack([sl, tp, hold_idx, direction, body_filter, wick_filter], dim=1)
+        # Causal Sweep (FIXED: Left-padding only, no future leakage)
+        sweep_pad = 5
+        sweep_long_raw = (self.low < self.liq_min).float().view(1, 1, -1)
+        sweep_short_raw = (self.high > self.liq_max).float().view(1, 1, -1)
+        left_pad = sweep_pad - 1
+        sweep_long_padded = torch.nn.functional.pad(sweep_long_raw, (left_pad, 0), value=0)
+        sweep_short_padded = torch.nn.functional.pad(sweep_short_raw, (left_pad, 0), value=0)
+        self.recent_sweep_long = torch.nn.functional.max_pool1d(sweep_long_padded, kernel_size=sweep_pad, stride=1, padding=0).view(-1)[:len(self.low)]
+        self.recent_sweep_short = torch.nn.functional.max_pool1d(sweep_short_padded, kernel_size=sweep_pad, stride=1, padding=0).view(-1)[:len(self.high)]
     
-    def evaluate(self, population):
-        """Score all strategies using CONDITION-BASED entries (not time-specific)."""
-        scores = torch.zeros(self.pop_size, device=DEVICE)
-        trade_counts = torch.zeros(self.pop_size, device=DEVICE)
+    def init_population(self):
+        """V5 Genome: [SL, TP, Body, Wick, FVG, Vol]"""
+        sl = torch.randint(5, 100, (self.pop_size,), device=DEVICE)
+        tp = torch.randint(10, 300, (self.pop_size,), device=DEVICE)
+        body = torch.randint(0, 15, (self.pop_size,), device=DEVICE)
+        wick = torch.randint(10, 100, (self.pop_size,), device=DEVICE)
+        fvg_str = torch.rand((self.pop_size,), device=DEVICE) * 2.5
+        rel_vol = torch.rand((self.pop_size,), device=DEVICE) * 2.0
+        return torch.stack([sl.float(), tp.float(), body.float(), wick.float(), fvg_str, rel_vol], dim=1)
+    
+    def evaluate_v5(self, pop):
+        """V5 PURE TICK EVALUATION - Uses tick data for precise outcome resolution."""
+        pop_size = len(pop)
+        scores = torch.zeros(pop_size, device=DEVICE)
+        trade_counts = torch.zeros(pop_size, device=DEVICE)
         
-        # Pre-calculate body and wick for condition filtering
-        body = torch.abs(self.closes - torch.roll(self.closes, 1))  # Approx body
-        wick_upper = self.highs - torch.maximum(self.closes, torch.roll(self.closes, 1))
-        wick_lower = torch.minimum(self.closes, torch.roll(self.closes, 1)) - self.lows
-        total_wick = wick_upper + wick_lower
-        wick_ratio = total_wick / (body + 0.01) * 100  # Wick as % of body
+        active_indices = self.session_mask
+        s_close = self.close[active_indices]
+        s_sma = self.sma[active_indices]
+        s_body = self.body_size[active_indices]
+        s_wick = self.wick_ratio[active_indices]
+        s_rel = self.rel_vol[active_indices]
+        s_fvg_long = self.fvg_bull_gap[active_indices]
+        s_fvg_short = self.fvg_bear_gap[active_indices]
+        sweep_long = (self.recent_sweep_long[active_indices] > 0)
+        sweep_short = (self.recent_sweep_short[active_indices] > 0)
+        trend_long = (s_close > s_sma)
+        trend_short = (s_close < s_sma)
         
-        for i in range(self.pop_size):
-            strat = population[i]
-            sl, tp, h_idx, direction, body_thresh, wick_thresh = strat
+        bar_times = self.df.index[active_indices.cpu().numpy()]
+        close_prices = s_close.cpu().numpy()
+        
+        for strat_idx in range(pop_size):
+            strat = pop[strat_idx]
+            c_sl, c_tp = strat[0].item(), strat[1].item()
+            c_body, c_wick = strat[2].item(), strat[3].item() / 100.0
+            c_fvg, c_vol = strat[4].item(), strat[5].item()
             
-            # Entry mask: Start with session window
-            mask = self.session_mask.clone()
+            mask_body = s_body >= c_body
+            mask_wick = s_wick <= c_wick
+            mask_vol = True if self.disable_vol else (s_rel >= c_vol)
             
-            # Apply CONDITION filters (not time-specific!)
-            # Body filter: Minimum body size in ticks
-            if body_thresh > 0:
-                mask = mask & (body >= body_thresh.float())
+            entry_long = sweep_long & trend_long & mask_body & mask_wick & mask_vol & (s_fvg_long >= c_fvg)
+            entry_short = sweep_short & trend_short & mask_body & mask_wick & mask_vol & (s_fvg_short >= c_fvg)
             
-            # Wick filter: Maximum wick ratio (reject high-wick rejection candles for trend)
-            if wick_thresh < 50:  # 50 = no filter
-                mask = mask & (wick_ratio <= wick_thresh.float())
+            long_entries = torch.where(entry_long)[0].cpu().numpy()
+            short_entries = torch.where(entry_short)[0].cpu().numpy()
             
-            # Get returns for entries that pass ALL filters
-            hold_val = self.valid_holds[h_idx.item()]
-            raw_rets = self.hold_returns[hold_val]
+            total_pnl, wins, losses = 0.0, 0, 0
             
-            hits = torch.masked_select(raw_rets, mask)
+            for idx in long_entries:
+                outcome, pnl_pts = resolve_outcome_ticks(self.tick_df, bar_times[idx], close_prices[idx], c_sl, c_tp, 'LONG')
+                if outcome == 'WIN':
+                    total_pnl += (pnl_pts * self.POINT_VALUE) - self.COMMISSION
+                    wins += 1
+                elif outcome == 'LOSS':
+                    total_pnl += (pnl_pts * self.POINT_VALUE) - self.COMMISSION - (self.SPREAD_SLIPPAGE * self.POINT_VALUE)
+                    losses += 1
             
-            # Check trade frequency (targeting 3-5/day = 750-1250/year)
-            if hits.numel() < MIN_TRADES_PER_YEAR:
-                scores[i] = -9999
-                continue
+            for idx in short_entries:
+                outcome, pnl_pts = resolve_outcome_ticks(self.tick_df, bar_times[idx], close_prices[idx], c_sl, c_tp, 'SHORT')
+                if outcome == 'WIN':
+                    total_pnl += (pnl_pts * self.POINT_VALUE) - self.COMMISSION
+                    wins += 1
+                elif outcome == 'LOSS':
+                    total_pnl += (pnl_pts * self.POINT_VALUE) - self.COMMISSION - (self.SPREAD_SLIPPAGE * self.POINT_VALUE)
+                    losses += 1
             
-            # Penalize if TOO many trades (overtrading)
-            if hits.numel() > MAX_TRADES_PER_YEAR:
-                overage_penalty = 0.9  # 10% penalty for overtrading
-            else:
-                overage_penalty = 1.0
+            trades = wins + losses
+            gross_profit = wins * ((c_tp * self.POINT_VALUE) - self.COMMISSION)
+            gross_loss = losses * ((c_sl * self.POINT_VALUE) + self.COMMISSION)
+            pf = gross_profit / (gross_loss + 0.001) if gross_loss > 0 else gross_profit
             
-            # Apply direction and REALISTIC COSTS
-            pnl = hits * direction - TOTAL_COST_PER_TRADE
+            score = total_pnl
+            if pf < 1.3: score -= 1e6
+            if trades < 50: score -= 1e6
             
-            # Calculate metrics
-            wins = (pnl > 0).sum().float()
-            losses = (pnl < 0).sum().float()
-            total_trades = wins + losses
+            scores[strat_idx] = score
+            trade_counts[strat_idx] = trades
             
-            if total_trades == 0:
-                scores[i] = -9999
-                continue
-            
-            win_rate = wins / total_trades
-            
-            # Reject if win rate too low
-            if win_rate < MIN_WIN_RATE:
-                scores[i] = -9999
-                continue
-            
-            if losses == 0:
-                pf = 10.0  # Cap PF
-            else:
-                win_sum = torch.masked_select(pnl, pnl > 0).sum()
-                loss_sum = torch.masked_select(pnl, pnl < 0).abs().sum()
-                pf = win_sum / (loss_sum + 0.001)
-            
-            expectancy = pnl.mean()
-            
-            # Reject if expectancy too low AFTER costs
-            if expectancy < MIN_EXPECTANCY:
-                scores[i] = -9999
-                continue
-            
-            # Fitness: Expectancy * sqrt(trades) * min(PF, 2) * overage_penalty
-            score = expectancy * torch.sqrt(total_trades) * torch.clamp(pf, max=2.0) * overage_penalty
-            
-            scores[i] = score
-            trade_counts[i] = total_trades
-            
+            if strat_idx > 0 and strat_idx % 100 == 0:
+                log(f"      V5 Progress: {strat_idx}/{pop_size}")
+        
         return scores, trade_counts
     
     def mutate(self, elites):
-        """Evolve population from elites."""
         num_elites = len(elites)
         needed = self.pop_size - num_elites
-        
         indices = torch.randint(0, num_elites, (needed,), device=DEVICE)
         next_gen = elites[indices].clone()
-        
-        # Mutate with 15% probability
-        prob = 0.15
+        prob = 0.2
         mask = torch.rand_like(next_gen.float()) < prob
-        
-        # Random mutations
-        noise = torch.stack([
-            torch.randint(3, 15, (needed,), device=DEVICE),
-            torch.randint(10, 100, (needed,), device=DEVICE),
-            torch.randint(0, len(self.valid_holds), (needed,), device=DEVICE),
-            torch.randint(0, 2, (needed,), device=DEVICE) * 2 - 1,
-            torch.randint(0, 10, (needed,), device=DEVICE),
-            torch.randint(0, 50, (needed,), device=DEVICE),
-        ], dim=1)
-        
-        next_gen = torch.where(mask, noise, next_gen)
+        noise = torch.randn_like(next_gen.float()) * torch.tensor([5, 10, 1, 5, 0.5, 0.2], device=DEVICE)
+        next_gen = torch.where(mask, next_gen + noise, next_gen)
+        next_gen = torch.clamp(next_gen, min=0.0)
         return torch.cat([elites, next_gen], dim=0)
     
     def run(self):
-        """Execute genetic evolution."""
-        log(f"  Starting genetic search for {self.session_name}...")
+        version = "V5 (Tick)" if self.tick_df is not None else "V4 (Bar)"
+        log(f"  Starting {version} Genetic Search for {self.session_name}...")
         pop = self.init_population()
         best_results = []
         
         for g in range(self.generations):
-            t0 = time.time()
-            scores, trades = self.evaluate(pop)
+            if self.tick_df is not None:
+                scores, trades = self.evaluate_v5(pop)
+            else:
+                log("WARNING: No tick data - V5 requires tick_df!")
+                return []
             
-            # Select top 10%
             k = int(self.pop_size * 0.1)
             top_vals, top_indices = torch.topk(scores, k)
-            
             best_score = top_vals[0].item()
-            best_strat = pop[top_indices[0]]
-            best_trades = trades[top_indices[0]].item()
             
             if (g + 1) % 10 == 0:
-                log(f"    Gen {g+1}/{self.generations} | Best: {best_score:.1f} | Trades: {best_trades:.0f}")
+                log(f"    Gen {g+1}/{self.generations} | Best: {best_score:.0f}")
             
-            # Store best
             if g == self.generations - 1:
-                for idx in top_indices[:5]:  # Top 5
-                    strat = pop[idx]
+                for idx in top_indices[:5]:
+                    s = pop[idx]
                     best_results.append({
                         'session': self.session_name,
-                        'sl': strat[0].item(),
-                        'tp': strat[1].item(),
-                        'hold_mins': self.valid_holds[strat[2].item()],
-                        'direction': 'LONG' if strat[3].item() == 1 else 'SHORT',
+                        'sl': s[0].item(), 'tp': s[1].item(),
+                        'body': s[2].item(), 'wick': s[3].item(),
+                        'fvg': s[4].item(), 'vol': s[5].item(),
+                        'direction': 'BOTH',
                         'score': scores[idx].item(),
                         'trades': trades[idx].item()
                     })
             
-            # Evolve
             elites = pop[top_indices]
             pop = self.mutate(elites)
-            
+        
         return best_results
 
 # ============================================================================
@@ -394,6 +473,14 @@ def run_overnight():
     # Load data with random train/test split
     train_df, test_df, train_months, test_months = load_train_test_data()
     
+    # V5: Load tick data for pure tick outcome resolution
+    tick_df = load_tick_data()
+    if tick_df is not None:
+        log("V5 Pure Tick Engine ACTIVE - Using tick data for SL/TP resolution")
+    else:
+        log("WARNING: No tick data found - V5 requires tick data!")
+        return
+    
     # ========================================================================
     # PHASE 1: Multi-Session Genetic Mining (on TRAIN data)
     # ========================================================================
@@ -408,7 +495,7 @@ def run_overnight():
             # Check RAM before starting
             check_ram_and_throttle()
             
-            miner = SessionGeneticMiner(train_df, session, population_size=15000, generations=150)
+            miner = SessionGeneticMiner(train_df, session, population_size=15000, generations=150, tick_df=tick_df)
             results = miner.run()
             all_results.extend(results)
             log(f"  {session}: Found {len(results)} strategies")
