@@ -161,6 +161,11 @@ MIN_PF = 1.3
 MIN_EXPECTANCY = 1.0  # Points AFTER costs
 MIN_WIN_RATE = 0.35  # 35% minimum
 
+# Robustness Requirements (REALISM)
+MAX_CONSECUTIVE_LOSSES = 10  # Stop if strategy has 10+ losing streak
+MAX_DRAWDOWN_PERCENT = 25.0  # Reject if max drawdown > 25% of peak equity
+MAX_DAILY_TRADES = 5  # Realistic daily limit (matches live trading)
+
 # ============================================================================
 # LOGGING
 # ============================================================================
@@ -463,10 +468,20 @@ class SessionGeneticMiner:
             
             trades = wins + losses
             pf = actual_win_pnl / (actual_loss_pnl + 0.001) if actual_loss_pnl > 0 else actual_win_pnl
+            win_rate = wins / (trades + 0.001)
+            expectancy = total_pnl / (trades + 0.001) if trades > 0 else 0
             
+            # Robust scoring with multiple gates
             score = total_pnl
-            if pf < 1.3: score -= 1e6
+            
+            # Hard gates (must pass all)
+            if pf < MIN_PF: score -= 1e6
             if trades < 50: score -= 1e6
+            if win_rate < MIN_WIN_RATE: score -= 1e6
+            
+            # Soft penalties (reduce score but don't eliminate)
+            if trades > 500: score *= 0.9  # Slight penalty for overtrading
+            if pf > 3.0: score *= 0.95  # Suspiciously high PF might be overfit
             
             scores[strat_idx] = score
             trade_counts[strat_idx] = trades
