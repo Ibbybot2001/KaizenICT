@@ -13,12 +13,6 @@ COMPONENTS = {
         "max_age_seconds": 15,
         "restart_delay": 5
     },
-    "ENGINE": {
-        "command": "python run_live_engine.py",
-        "heartbeat_file": "live_dashboard.json",
-        "max_age_seconds": 15,
-        "restart_delay": 5
-    },
     "DASHBOARD": {
         "command": "python live_dashboard.py",
         "heartbeat_file": None, # Visual only
@@ -88,13 +82,47 @@ def check_and_revive():
             except Exception as e:
                 log_sentinel(f"❌ Failed to launch {name}: {e}")
 
+def kill_prior_instances():
+    """Kill any existing Bridge/Dashboard processes before starting fresh."""
+    import psutil
+    
+    targets = ["ibkr_bridge.py", "live_dashboard.py", "sentinel_watchdog.py"]
+    current_pid = os.getpid()
+    killed = []
+    
+    for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+        try:
+            if proc.info['pid'] == current_pid:
+                continue  # Don't kill ourselves
+            
+            cmdline = proc.info.get('cmdline') or []
+            cmdline_str = ' '.join(cmdline).lower()
+            
+            for target in targets:
+                if target.lower() in cmdline_str:
+                    log_sentinel(f"🔪 Killing prior instance: PID {proc.info['pid']} ({target})")
+                    proc.kill()
+                    killed.append(proc.info['pid'])
+                    break
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+    
+    if killed:
+        log_sentinel(f"✅ Killed {len(killed)} prior instance(s). Clean slate.")
+        time.sleep(1)  # Let them die
+    else:
+        log_sentinel("✅ No prior instances found. Starting fresh.")
+
 def main():
-    log_sentinel("=== Sentinel Watchdog Activated (Uptime Enforcement ===)")
-    log_sentinel("System will monitor: Bridge, Engine, Dashboard")
+    log_sentinel("=== Sentinel Watchdog Activated (Uptime Enforcement) ===")
+    log_sentinel("System will monitor: Bridge, Dashboard")
     
     # Cleanup logs on start
     if os.path.exists("sentinel.log"):
         os.remove("sentinel.log")
+    
+    # Kill any prior instances to prevent duplicates
+    kill_prior_instances()
 
     try:
         while True:

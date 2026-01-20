@@ -25,8 +25,8 @@ CONTRACT_MONTH = '202603' # Correct Front Month for 2026
 DATA_ONLY_MODE = False 
 
 # Risk
-SL_POINTS = 15
-TP_POINTS = 40 
+SL_POINTS = 5       # Sniper Precision (BH Closed)
+TP_POINTS = 40      # Target (1:8 R:R)
 CONTRACTS = 1
 
 # Triggers
@@ -39,14 +39,14 @@ SHORT_DIST_BIPS = 10.0
 MAX_WICK_RATIO = 0.25
 MIN_REL_VOL = 1.5
 
-# Session (NY Time)
-START_HOUR = 9
-START_MINUTE = 30
-END_HOUR = 15
-END_MINUTE = 55
+# Session (NY Time: 24/7 Pivot)
+START_HOUR = 0
+START_MINUTE = 0
+END_HOUR = 23
+END_MINUTE = 59
 
 # Safety Limit (Matched to Research)
-MAX_DAILY_TRADES = 2
+MAX_DAILY_TRADES = 999 # UNLOCKED (High-Density Growth Mode)
 
 class GoldenBot:
     def __init__(self):
@@ -55,6 +55,7 @@ class GoldenBot:
         self.contract = None
         self.in_position = False
         self.csv_file = 'live_dashboard.csv'
+        self.audit_file = 'trades_audit.csv'
         self.gs_logger = DashboardLogger() # Google Sheets Logger
         self.latest_metrics = {
             "vol": 0, "wick": 0, "body": 0,
@@ -72,6 +73,8 @@ class GoldenBot:
         # Trade Limiter
         self.daily_trade_count = 0
         self.last_trade_day = None
+        self.traded_signals = set() # Signature guard for entries
+        self.logged_minutes = set() # Signature guard for telemetry logs
         
         # Stateful Sweep Flags (Persist until reset)
         self.swept_ib_low = False
@@ -79,19 +82,29 @@ class GoldenBot:
         self.swept_asia_low = False
         self.swept_asia_high = False
         
+        # Performance Tracking
+        self.current_trade = None # Stores {entry, direction, strat, sl, tp, gs_row}
+        self.last_trade_time = 0 # Safety timer for race conditions
+        self.empty_pos_count = 0 # Persistence counter
+        
         # Init CSV if not exists
         if not os.path.exists(self.csv_file):
             with open(self.csv_file, 'w') as f:
                 f.write("timestamp,price,action,signal_type,rel_vol,wick_ratio,body,dh,dl,dist_h,dist_l\n")
+        if not os.path.exists(self.audit_file):
+            with open(self.audit_file, 'w') as f:
+                f.write("timestamp,strat,direction,entry,sl,tp,exit,pnl_pts,status\n")
         
     async def run(self):
         # Connect: Try Paper (7497) then Live (7496)
         print("Connecting to IBKR...")
         connected = False
+        import random
+        client_id = random.randint(100, 999)
         for port in [7497, 7496]:
             try:
-                print(f"Trying Port {port}...")
-                await self.ib.connectAsync('127.0.0.1', port, clientId=115)
+                print(f"Trying Port {port} (Client ID: {client_id})...")
+                await self.ib.connectAsync('127.0.0.1', port, clientId=client_id)
                 connected = True
                 print(f"✅ Success on Port {port}")
                 break
@@ -107,9 +120,9 @@ class GoldenBot:
         await self.ib.qualifyContractsAsync(self.contract)
         print(f"Tracking: {self.contract}")
 
-        # Subscribe to 1 min bars (Real-time updates)
+        # Subscribe to 1 min bars (Deep Memory Pivot: 1 Week)
         self.ib.reqHistoricalData(
-            self.contract, endDateTime='', durationStr='2 D',
+            self.contract, endDateTime='', durationStr='1 W',
             barSizeSetting='1 min', whatToShow='TRADES', useRTH=False,
             keepUpToDate=True
         )
@@ -124,8 +137,21 @@ class GoldenBot:
         asyncio.create_task(self.heartbeat_loop())
         # Start Stats Export Task
         asyncio.create_task(self.stats_loop())
+        # Start Position Monitor Task
+        asyncio.create_task(self.monitor_positions_loop())
         
         print(f"✅ Bridge Running. Feeding: strategies/mle/data/live_ticks.csv")
+
+        # INITIAL AUDIT: Check if we are starting with a position
+        try:
+            positions = self.ib.positions()
+            for p in positions:
+                if p.contract.symbol == SYMBOL or p.contract.localSymbol.startswith(SYMBOL):
+                    if p.position != 0:
+                        self.in_position = True
+                        print(f"🛡️ GUARDIAN: Internalized ACTIVE POSITION {p.position} contract(s) on startup.")
+        except Exception as e:
+            print(f"Audit Error: {e}")
         
         # Keep alive
         while self.ib.isConnected():
@@ -143,19 +169,153 @@ class GoldenBot:
         self.log_tick_only(last_bar.date, last_bar.close)
 
         # 3. Finalized Bar Processing
-        # [DE-DUPLICATION]: Log only raw ticks here. 
-        # The Live Engine is the sole authority for 1-minute bars and logic.
         if has_new_bar:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] IBKR Bar Closed: {last_bar.close}")
-            
+            # --- ENGINE THOUGHT STREAM (The Narrative) ---
+            try:
+                # Engineering features for the narrative
+                self.df = self.engineer_live_features(self.df)
+                row = self.df.iloc[-1]
+                
+                # Check Filters First
+                time_ok = True # 24/7 ENGAGEMENT ENABLED
+                trades_left = MAX_DAILY_TRADES - self.daily_trade_count
+                
+                # Build the "Thought"
+                thoughts = []
+                if not time_ok: # Legacy catch
+                    thoughts.append(f"⏱️ SLEEPING.")
+                elif trades_left <= 0:
+                    thoughts.append(f"🔒 LOCKED: Daily trade limit reached ({MAX_DAILY_TRADES}/{MAX_DAILY_TRADES}).")
+                elif self.in_position or self.current_trade:
+                    thoughts.append(f"🛡️ GUARDIAN: Position Active. Watching for Target/Stop.")
+                else:
+                    # Capture State
+                    high_dist = row['close'] - row['IB_H']
+                    low_dist = row['close'] - row['IB_L']
+                    trend_score = "BULLISH" if row['close'] > row['SMA_200'] else "BEARISH"
+                    
+                    if not self.swept_ib_high and not self.swept_ib_low:
+                        thoughts.append(f"🎯 HUNTING: Price is INSIDE IB Range ({row['IB_H']:.1f} - {row['IB_L']:.1f}). Waiting for a Liquidity Sweep.")
+                    
+                    if self.swept_ib_high:
+                        thoughts.append(f"⚠️ DETECTED: IB High ({row['IB_H']:.1f}) has been SWEPT.")
+                        if trend_score == "BULLISH":
+                            thoughts.append(f"🛡️ FILTER: Trend is {trend_score} (SMA 200). Refusing Shorts for safety.")
+                        else:
+                            thoughts.append(f"🏹 SIGNAL: Scanning for Bearish FVG to confirm Short entry.")
+                            
+                    if self.swept_ib_low:
+                        thoughts.append(f"⚠️ DETECTED: IB Low ({row['IB_L']:.1f}) has been SWEPT.")
+                        if trend_score == "BEARISH":
+                            thoughts.append(f"🛡️ FILTER: Trend is {trend_score} (SMA 200). Refusing Longs for safety.")
+                        else:
+                            thoughts.append(f"🏹 SIGNAL: Scanning for Bullish FVG to confirm Long entry.")
+
+                # Final Print Block
+                ny_now = self.gs_logger.get_ny_time_str()
+                print(f"\n🧠 [ENGINE THOUGHTS] {ny_now}")
+                print(f"   ► {' | '.join(thoughts)}")
+                print(f"   ► P:{row['close']:.1f} | SMA:{row['SMA_200']:.1f} | D:{trades_left} Left")
+                
+                # Weekly Pos Report
+                w_h = row.get('WEEK_H', 0)
+                w_l = row.get('WEEK_L', 0)
+                w_range = w_h - w_l
+                rel_pos = (row['close'] - w_l) / w_range if w_range > 0 else 0.5
+                
+                exhaustion = ""
+                if rel_pos > 0.90: exhaustion = "⚠️ [EXHAUSTED HIGH - LONGS BLOCKED]"
+                elif rel_pos < 0.10: exhaustion = "⚠️ [EXHAUSTED LOW - SHORTS BLOCKED]"
+                
+                print(f"   ► WEEKLY: Pos:{rel_pos*100:.1f}% | H:{w_h:.1f} | L:{w_l:.1f} {exhaustion}\n")
+
+            except Exception as e:
+                print(f"Thought Stream Error: {e}")
+
             # --- CRITICAL: EXECUTE STRATEGY ---
             try:
-                action, details, strat_id = self.check_signals(self.df)
+                action, details, strat_id, sig_ts = self.check_signals(self.df)
+                
+                # 4. Log Event (1-Min Summary for Sheets)
+                # Signature Guard: Only log each NY timestamp ONCE
+                ny_ts_str = row['ny_time'].strftime('%Y-%m-%d %H:%M')
+                if ny_ts_str not in self.logged_minutes:
+                    self.log_event(
+                        ts=row['ny_time'], 
+                        price=row['close'], 
+                        action=action or "HUNTING", 
+                        details=details or "Scanning...",
+                        vol=row.get('rel_vol', 0),
+                        wick=row.get('wick_ratio', 0),
+                        body=row.get('body_ticks', 0),
+                        dh=row.get('IB_H', 0),
+                        dl=row.get('IB_L', 0),
+                        disth=0, distl=0
+                    )
+                    self.logged_minutes.add(ny_ts_str)
+
                 if action:
-                    self.execute_trade(action, last_bar.close, strat_id)
+                    self.execute_trade(action, last_bar.close, strat_id, sig_ts)
             except Exception as e:
                 print(f"Signal Check Error: {e}")
             # ----------------------------------
+
+    async def monitor_positions_loop(self):
+        """Syncs self.in_position and logs exits to GS."""
+        while self.ib.isConnected():
+            await asyncio.sleep(2) # Poll every 2s
+            try:
+                positions = self.ib.positions()
+                found = False
+                for p in positions:
+                    # Robust Symbol Check: Handles MNQ, MNQH6, etc.
+                    # IBKR Contract object's symbol is usually the base 'MNQ'
+                    if p.contract.symbol == SYMBOL or p.contract.localSymbol.startswith(SYMBOL):
+                        if p.position != 0:
+                            found = True
+                            break
+                
+                # REINFORCED GUARD: Persistence Logic
+                if found:
+                    self.empty_pos_count = 0
+                    self.in_position = True
+                else:
+                    self.empty_pos_count += 1
+                    
+                # Only process EXIT if we were in a position AND we have 5 consecutive empty polls
+                # (10 seconds of persistent FLAT status)
+                # AND we are past the 30s settlement window
+                if self.in_position and not found and self.empty_pos_count >= 5:
+                    if time.time() - self.last_trade_time < 30:
+                        # Still in the "Fog of War" after entry - FORCE LOCK
+                        pass 
+                    else:
+                        print(f"📉 EXIT DETECTED: Position confirmed closed after {self.empty_pos_count} polls.")
+                        # Grab trade details into local variables
+                        trade_to_close = self.current_trade
+                        if trade_to_close and trade_to_close.get('gs_row'):
+                            row_idx = trade_to_close['gs_row']
+                            strat_id = trade_to_close['strat']
+                            entry_px = trade_to_close['entry']
+                            side = trade_to_close['direction']
+                            
+                            exit_price = self.last_known_price or 0
+                            pnl_pts = (exit_price - entry_px) if side == "BUY" else (entry_px - exit_price)
+                            
+                            self.gs_logger.update_trade_close(
+                                row_index=row_idx,
+                                exit_price=exit_price,
+                                pnl_pts=pnl_pts
+                            )
+                            self.log_audit_event(trade_to_close, exit_price, "CLOSED")
+                            print(f"✅ GS Updated: {strat_id} CLOSED (Row {row_idx}). PnL Pts: {pnl_pts:.2f}")
+                            
+                        # CRITICAL: Reset internal state
+                        self.current_trade = None
+                        self.in_position = False
+                        self.empty_pos_count = 0
+            except Exception as e:
+                print(f"Position Monitor Error: {e}")
 
     async def heartbeat_loop(self):
         """Ensures a gapless 1Hz data stream even when market is quiet."""
@@ -167,11 +327,10 @@ class GoldenBot:
                 if now - self.last_hb_time >= 0.95:
                     self.ibkr_tick_count += 1
                     self.log_tick_only(datetime.now(), self.last_known_price)
-                    # Note: log_tick_only handles GS as well if desired, 
-                    # but we usually only want GS to see true updates
-                    # Actually, user wants perfect sheet consistency, so we log to GS too.
-                    if self.gs_logger.enabled:
-                        self.gs_logger.log_tick(datetime.now(), self.last_known_price, 1)
+                    # DISABLED: GS tick logging to reduce API usage
+                    # 1-min data and TradeLog still logged to GS
+                    # if self.gs_logger.enabled:
+                    #     self.gs_logger.log_tick(datetime.now(), self.last_known_price, 1)
 
     def on_ticker(self, tickers):
         """Called by IBKR on every price update (fast)."""
@@ -180,15 +339,65 @@ class GoldenBot:
                 self.ibkr_tick_count += 1
                 self.last_known_price = t.last
                 self.last_hb_time = time.time()
-                # MAXIMUM DATA: Log every single update instantly
+                # Local CSV tick logging (lightweight)
                 self.log_tick_only(t.time or datetime.now(), t.last)
-                if self.gs_logger.enabled:
-                    self.gs_logger.log_tick(t.time or datetime.now(), t.last, 1)
+                # DISABLED: GS tick logging to reduce API usage
+                # if self.gs_logger.enabled:
+                #     self.gs_logger.log_tick(t.time or datetime.now(), t.last, 1)
+                
+                # REAL-TIME SL/TP PROBE
+                if self.current_trade:
+                    self.check_active_trade_sl_tp(t.last)
+
+    def check_active_trade_sl_tp(self, current_price):
+        """Proactively monitors ticks for SL/TP breaches."""
+        trade = self.current_trade
+        if not trade: return
+        
+        sl = trade['sl']
+        tp = trade['tp']
+        side = trade['direction']
+        
+        breached = False
+        reason = ""
+        
+        if side == "BUY":
+            if current_price <= sl:
+                breached = True
+                reason = "STOP_LOSS"
+            elif current_price >= tp:
+                breached = True
+                reason = "TAKE_PROFIT"
+        else: # SELL
+            if current_price >= sl:
+                breached = True
+                reason = "STOP_LOSS"
+            elif current_price <= tp:
+                breached = True
+                reason = "TAKE_PROFIT"
+                
+        if breached:
+            # We don't close here (broker handles it), but we LOG the audit event
+            # Use a throttle or flag to avoid spamming the log
+            if not trade.get('audit_logged'):
+                print(f"⚠️ [AUDIT] Price touched {reason} level ({current_price:.1f}). Waiting for broker exit confirmation...")
+                trade['audit_logged'] = True
+                self.log_audit_event(trade, current_price, f"TOUCHED_{reason}")
+
+    def log_audit_event(self, trade, exit_px, status):
+        """Logs trade lifecycle events to local CSV."""
+        try:
+            ts = self.gs_logger.get_ny_time_str()
+            pnl = (exit_px - trade['entry']) if trade['direction'] == "BUY" else (trade['entry'] - exit_px)
+            with open(self.audit_file, 'a') as f:
+                f.write(f"{ts},{trade['strat']},{trade['direction']},{trade['entry']},{trade['sl']},{trade['tp']},{exit_px},{pnl:.2f},{status}\n")
+        except: pass
 
     def log_tick_only(self, ts, price):
         """Minimal logging for raw tick stream."""
         try:
-            tick_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+            # Use GS logger's NY time helper for consistency
+            tick_str = self.gs_logger.get_ny_time_str(ts)
             log_path = "strategies/mle/data/live_ticks.csv"
             os.makedirs(os.path.dirname(log_path), exist_ok=True)
             with open(log_path, 'a') as f:
@@ -211,42 +420,21 @@ class GoldenBot:
             except: pass
 
     def log_event(self, ts, price, action, details, vol, wick, body, dh, dl, disth, distl):
-        # 1. Dashboard Log (Legacy Rich Data)
+        # 1. Local CSV Dashboard Log
         try:
+            ts_str = self.gs_logger.get_ny_time_str(ts)
             with open(self.csv_file, 'a') as f:
-                f.write(f"{ts},{price},{action},{details},{vol:.2f},{wick:.2f},{body:.1f},{dh:.2f},{dl:.2f},{disth:.1f},{distl:.1f}\n")
+                # Local CSV usually likes simple strings
+                f.write(f"{ts_str},{price},{action},{details},{vol:.2f},{wick:.2f},{body:.1f},{dh:.2f},{dl:.2f},{disth:.1f},{distl:.1f}\n")
         except Exception as e:
             print(f"Bridge Write Error: {e}")
 
-        # 3. Google Sheet Log
+        # 2. Google Sheet Log
         if self.gs_logger.enabled:
-            # Timezone Handling
-            if isinstance(ts, datetime):
-                # Ensure it has timezone info if not present
-                if ts.tzinfo is None:
-                    ny_tz = pytz.timezone('America/New_York')
-                    ts = ny_tz.localize(ts)
-                else:
-                    ts = ts.astimezone(pytz.timezone('America/New_York'))
-                ts_str = ts.strftime('%Y-%m-%d %H:%M:%S')
-            else:
-                ts_str = str(ts)
-            
-            # NaN Safety for Sheets (JSON doesn't support NaN/Inf)
-            def sf(v):
-                try:
-                    val = float(v)
-                    return 0.0 if np.isnan(val) or np.isinf(val) else val
-                except: return 0.0
-
+            # log_min_data now handles its own NY timezone and NaN safety
             self.gs_logger.log_min_data(
-                ts_str, sf(price), action, details, 
-                sf(vol), sf(wick), sf(body), sf(dh), sf(dl), sf(disth), sf(distl)
-            )
-
-            self.gs_logger.log_min_data(
-                ts_str, sf(price), action, details, 
-                sf(vol), sf(wick), sf(body), sf(dh), sf(dl), sf(disth), sf(distl)
+                ts, price, action, details, vol, wick, 
+                body, dh, dl, disth, distl
             )
 
     def engineer_live_features(self, df):
@@ -303,6 +491,10 @@ class GoldenBot:
                 df['ASIA_H'] = 0
                 df['ASIA_L'] = 0
             
+            # 3. WEEKLY Levels (Across the full 1-Week dataframe)
+            df['WEEK_H'] = df['high'].max()
+            df['WEEK_L'] = df['low'].min()
+            
             # 3. FVG Logic
             # Bullish FVG: Low > High[n-2]
             prev_high = df['high'].shift(2)
@@ -325,34 +517,56 @@ class GoldenBot:
             # 4. TREND FILTER (SMA 200)
             df['SMA_200'] = df['close'].rolling(window=200).mean()
             
+            # 5. MICRO-METRICS (For the Ledger)
+            # Body Ticks (Points for now)
+            df['body_ticks'] = (df['close'] - df['open']).abs()
+            
+            # Wick Ratio
+            df['range'] = (df['high'] - df['low']).replace(0, 1e-6)
+            df['body'] = (df['close'] - df['open']).abs()
+            df['wick_ratio'] = (df['range'] - df['body']) / df['range']
+            
+            # Relative Volume (10-bar avg)
+            df['avg_vol'] = df['volume'].rolling(window=10).mean().replace(0, 1e-6)
+            df['rel_vol'] = df['volume'] / df['avg_vol']
+            
+            # Displacement Z-Score (Placeholder or simple diff)
+            df['disp_z'] = df['body'] / df['body'].rolling(window=20).std()
+            
             return df
         except Exception as e:
             print(f"Feature Eng Error: {e}")
             return df
 
     def check_signals(self, df):
+        # 0. Double-Wall Position Guard
+        # Blocks if IBKR sees a position OR if bot is still processing an internal trade state
+        if self.in_position or self.current_trade:
+            return None, "Position/Internal State Active", None
+
         # 1. Engineer Features
         df = self.engineer_live_features(df)
-        
-        # 2. Get Current State (Just Closed Bar)
+        if df.empty or len(df) < 5: return None, "Insufficient Data", None
         row = df.iloc[-1]
         
-        # 3. Time Filter (US Session: 10:00 - 16:00)
-        # We allow 10:00 to 15:30?
-        # User wants "Intraday". Let's stick to 09:30 - 16:00 generally, 
-        # but strategy specific?
-        # IB Strategy starts AFTER IB (10:00).
-        # Asia Strategy can trade anytime NY session?
-        # Let's use 10:00 - 15:55.
+        # 3. Time Filter (REMOVED for 24/7 Pivot)
+        pass 
         
-        if current_hour < 10 or current_hour >= 16:
-            return None, "Outside Session (10-16)", None
-            
+        # 4. Weekly Exhaustion Filter (Phase 26 Optimized)
+        # Blocks Longs in top 10% of week; blocks Shorts in bottom 10% of week.
+        w_h = row.get('WEEK_H', 0)
+        w_l = row.get('WEEK_L', 0)
+        w_range = w_h - w_l
+        rel_pos = (row['close'] - w_l) / w_range if w_range > 0 else 0.5
+        
         # Trade Limiter & State Reset
         today_date = row['date_only']
         if self.last_trade_day != today_date:
             self.daily_trade_count = 0 # Reset for new day
             self.last_trade_day = today_date
+            self.traded_signals = set() # Clear signal memory
+            self.logged_minutes = set() # Clear logging memory
+            
             # Reset Sweep Flags for new day
             self.swept_ib_low = False
             self.swept_ib_high = False
@@ -382,10 +596,14 @@ class GoldenBot:
             trend_ok_long = row['close'] > row['SMA_200'] if pd.notna(row['SMA_200']) else True
             trend_ok_short = row['close'] < row['SMA_200'] if pd.notna(row['SMA_200']) else True
             
-            if self.swept_ib_low and row['fvg_bull'] and trend_ok_long:
+            # Weekly Exhaustion Filter (Phase 26)
+            long_allowed = rel_pos <= 0.90 # Block near Weekly High
+            short_allowed = rel_pos >= 0.10 # Block near Weekly Low
+            
+            if self.swept_ib_low and row['fvg_bull'] and trend_ok_long and long_allowed:
                 ib_signal = True
                 ib_dir = 1 # BUY
-            elif self.swept_ib_high and row['fvg_bear'] and trend_ok_short:
+            elif self.swept_ib_high and row['fvg_bear'] and trend_ok_short and short_allowed:
                 ib_signal = True
                 ib_dir = -1 # SELL
                 
@@ -403,10 +621,15 @@ class GoldenBot:
             trend_ok_short = row['close'] < row['SMA_200'] if pd.notna(row['SMA_200']) else True
 
             # Check Trigger
-            if self.swept_asia_low and row['fvg_bull'] and trend_ok_long:
+            # Weekly Exhaustion Filter (Phase 26)
+            long_allowed = rel_pos <= 0.90
+            short_allowed = rel_pos >= 0.10
+
+            # Check Trigger
+            if self.swept_asia_low and row['fvg_bull'] and trend_ok_long and long_allowed:
                 asia_signal = True
                 asia_dir = 1
-            elif self.swept_asia_high and row['fvg_bear'] and trend_ok_short:
+            elif self.swept_asia_high and row['fvg_bear'] and trend_ok_short and short_allowed:
                 asia_signal = True
                 asia_dir = -1
                 
@@ -425,12 +648,32 @@ class GoldenBot:
             final_strat = "IB_Hybrid"
             final_action = "BUY" if ib_dir == 1 else "SELL"
             
+        # 6. Signature Guard (Mechanical suppression of redundant signals)
+        if final_action:
+            sig_ts = str(row['time'])
+            signature = (sig_ts, final_strat, final_action)
+            
+            if signature in self.traded_signals:
+                return None, f"Signal Already Executed ({sig_ts})", None
+            
+            # 7. Settlement Cooldown (Quick 30s buffer for order flight)
+            if (time.time() - self.last_trade_time) < 30:
+                return None, "Settlement Cooldown (Order in Flight)", None
+
         details = f"IB={row['IB_H']:.1f}/{row['IB_L']:.1f}, ASIA={row['ASIA_H']:.1f}/{row['ASIA_L']:.1f}"
         
-        # Return Tuple
-        return final_action, details, final_strat
+        # Capture Metrics for the ledger
+        self.latest_metrics = {
+            'wick': row['wick_ratio'] if 'wick_ratio' in row else 0,
+            'vol': row['rel_vol'] if 'rel_vol' in row else 0,
+            'body': row['body_ticks'] if 'body_ticks' in row else 0,
+            'zscore': row['disp_z'] if 'disp_z' in row else 0
+        }
 
-    def execute_trade(self, action, price, strategy_id="GOLDEN_DEFAULT"):
+        # Return Tuple (Action, Details, Strat_ID, Signal_TS)
+        return final_action, details, final_strat, str(row['time']) if final_action else None
+
+    def execute_trade(self, action, price, strategy_id="GOLDEN_DEFAULT", sig_ts=None):
         if DATA_ONLY_MODE:
             print(f"🛑 DATA ONLY MODE: Trade {action} @ {price} BLOCKED.")
             return
@@ -438,19 +681,12 @@ class GoldenBot:
         print(f"🚀 LIVE EXECUTION: {action} @ {price} | Strat: {strategy_id}")
         
         # CONFIG MAP (Portfolio)
-        # IB: TP 55, SL 5
+        # IB: TP 80, SL 5
         # ASIA: TP 85, SL 5
         
-        if strategy_id == "ASIA_Hybrid":
-            param_tp = 85
-            param_sl = 5
-        elif strategy_id == "IB_Hybrid":
-            param_tp = 55
-            param_sl = 5
-        else:
-            # Fallback
-            param_tp = 40
-            param_sl = 15
+        # CONFIG MAP (Robust Pivot)
+        param_tp = TP_POINTS
+        param_sl = SL_POINTS
         
         # Calculate SL/TP
         if action == "BUY":
@@ -467,13 +703,13 @@ class GoldenBot:
         
         # Increment Daily Count on Success
         if res == "TP-OK":
-            self.daily_trade_count += 1
-            print(f"✅ Trade Count: {self.daily_trade_count}/{MAX_DAILY_TRADES}")
-        
-        # Log to GS
-        if res == "TP-OK":
+            self.in_position = True # Immediate Lock
+            self.empty_pos_count = 0 # Reset Persistence Guard
+            self.last_trade_time = time.time() # Start settlement timer
+            
+            # Log to GS immediately and capture row index
             m = self.latest_metrics
-            self.gs_logger.log_trade(
+            gs_row = self.gs_logger.log_trade(
                 pool_id=strategy_id, 
                 direction=action, 
                 entry=price, 
@@ -482,8 +718,26 @@ class GoldenBot:
                 status="OPEN",
                 wick=m['wick'],
                 vol=m['vol'],
-                body=m['body']
+                body=m['body'],
+                zscore=m['zscore']
             )
+            
+            self.current_trade = {
+                'entry': price,
+                'direction': action,
+                'strat': strategy_id,
+                'sl': sl,
+                'tp': tp,
+                'gs_row': gs_row # Store row index for closing update
+            }
+            # Initial Audit Log
+            self.log_audit_event(self.current_trade, price, "OPEN")
+            # Record the signature immediately!
+            if sig_ts:
+                self.traded_signals.add((sig_ts, strategy_id, action))
+                
+            self.daily_trade_count += 1
+            print(f"✅ Trade Count: {self.daily_trade_count}/{MAX_DAILY_TRADES}")
 
 if __name__ == '__main__':
     bot = GoldenBot()
