@@ -1004,8 +1004,8 @@ def run_overnight():
         if 'pattern' in r: extras.append(f"Pattern:{r['pattern']}")
         extra_str = " | " + ", ".join(extras) if extras else ""
         
-        log(f"{i+1}. {r.get('session', '?')} | {r['direction']} | SL:{r['sl']} TP:{r['tp']} | "
-            f"Hold:{r['hold_mins']}min | Score:{r['score']:.1f} | Trades:{r['trades']:.0f}{extra_str}")
+        log(f"{i+1}. {r.get('session', '?')} | {r['direction']} | SL:{r['sl']:.0f} TP:{r['tp']:.0f} | "
+            f"Score:{r['score']:.0f} | Trades:{r['trades']:.0f}{extra_str}")
     
     elapsed = (time.time() - overall_start) / 60
     log(f"\n⏱️ Total Runtime: {elapsed:.1f} minutes")
