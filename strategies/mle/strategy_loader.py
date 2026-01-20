@@ -67,6 +67,11 @@ class StrategyLoader:
                             self._strategies[s_id] = {
                                 "sl": float(item.get('stop_loss', item.get('sl', 5.0))),
                                 "tp": float(item.get('take_profit', item.get('tp', 40.0))),
+                                # Full genome for live trading parity
+                                "body": float(item.get('body', 0.0)),
+                                "wick": float(item.get('wick', 100.0)),  # % max
+                                "fvg": float(item.get('fvg', 0.0)),
+                                "vol": float(item.get('vol', 0.0)),
                                 "description": f"Mined {item.get('date', 'Unknown')}"
                             }
                 elif isinstance(data, dict):

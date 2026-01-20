@@ -38,6 +38,8 @@ SHORT_BODY_MIN_TICKS = 6.8
 SHORT_DIST_BIPS = 10.0
 
 # Sniper Filters (Hyper-Dive)
+# TODO: These should come from strategy_loader for discovered params parity
+# Currently hardcoded - live trading may not match backtest filters exactly
 MAX_WICK_RATIO = 0.25
 MIN_REL_VOL = 1.5
 
