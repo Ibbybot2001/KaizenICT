@@ -195,6 +195,7 @@ def load_train_test_data():
     """
     Load data with RANDOM 70/30 train/test split.
     NOT sequential - random months to avoid temporal bias.
+    IMPORTANT: Calculates indicators on FULL data before split to avoid boundary discontinuities.
     """
     log("Loading data with random 70/30 train/test split...")
     
@@ -213,20 +214,40 @@ def load_train_test_data():
     log(f"  TRAIN months: {train_months}")
     log(f"  TEST months: {test_months}")
     
-    train_dfs = []
-    test_dfs = []
-    
+    # Load ALL data first
+    all_dfs = []
     for month in range(1, 13):
         file_path = DATA_DIR / f"USTEC_2025-{month:02d}_clean_1m.parquet"
         if file_path.exists():
             df = pd.read_parquet(file_path)
-            if month in train_months:
-                train_dfs.append(df)
-            else:
-                test_dfs.append(df)
+            all_dfs.append(df)
+            log(f"  Loaded {file_path.name}: {len(df):,} bars")
     
-    train_df = pd.concat(train_dfs)
-    test_df = pd.concat(test_dfs)
+    # Combine and calculate indicators on CONTINUOUS data
+    combined = pd.concat(all_dfs).sort_index()
+    log(f"  Calculating Indicators (SMA, Liquidity, Vol)...")
+    
+    combined['sma200'] = combined['close'].rolling(200, min_periods=200).mean()
+    combined['roll_min'] = combined['low'].rolling(60, min_periods=60).min()
+    combined['roll_max'] = combined['high'].rolling(60, min_periods=60).max()
+    
+    # Volume handling - use tick_volume if volume is missing or zero
+    if 'volume' not in combined.columns or combined['volume'].sum() < 1.0:
+        if 'tick_volume' in combined.columns:
+            combined['volume'] = combined['tick_volume']
+        else:
+            combined['volume'] = 1.0  # Fallback
+    
+    vol_ma = combined['volume'].rolling(20, min_periods=1).mean()
+    combined['rel_vol'] = combined['volume'] / (vol_ma + 1e-9)
+    
+    # Drop NaN rows from indicator warmup
+    combined = combined.dropna(subset=['sma200', 'roll_min', 'roll_max'])
+    
+    # Split by month
+    combined['month'] = pd.to_datetime(combined.index).month
+    train_df = combined[combined['month'].isin(train_months)].drop(columns=['month'])
+    test_df = combined[combined['month'].isin(test_months)].drop(columns=['month'])
     
     log(f"  TRAIN: {len(train_df):,} bars")
     log(f"  TEST: {len(test_df):,} bars (UNSEEN)")
@@ -365,29 +386,40 @@ class SessionGeneticMiner:
             short_entries = torch.where(entry_short)[0].cpu().numpy()
             
             total_pnl, wins, losses = 0.0, 0, 0
+            actual_win_pnl, actual_loss_pnl = 0.0, 0.0  # Track actual PnL for true PF
             
             for idx in long_entries:
                 outcome, pnl_pts = resolve_outcome_ticks(self.tick_df, bar_times[idx], close_prices[idx], c_sl, c_tp, 'LONG')
+                # Apply costs uniformly: SPREAD on entry, COMMISSION on round-trip
+                entry_cost = (self.SPREAD_SLIPPAGE * self.POINT_VALUE) + self.COMMISSION
                 if outcome == 'WIN':
-                    total_pnl += (pnl_pts * self.POINT_VALUE) - self.COMMISSION
+                    trade_pnl = (pnl_pts * self.POINT_VALUE) - entry_cost
+                    total_pnl += trade_pnl
                     wins += 1
+                    actual_win_pnl += trade_pnl
                 elif outcome == 'LOSS':
-                    total_pnl += (pnl_pts * self.POINT_VALUE) - self.COMMISSION - (self.SPREAD_SLIPPAGE * self.POINT_VALUE)
+                    trade_pnl = (pnl_pts * self.POINT_VALUE) - entry_cost  # pnl_pts is negative
+                    total_pnl += trade_pnl
                     losses += 1
+                    actual_loss_pnl += abs(trade_pnl)
             
             for idx in short_entries:
                 outcome, pnl_pts = resolve_outcome_ticks(self.tick_df, bar_times[idx], close_prices[idx], c_sl, c_tp, 'SHORT')
+                entry_cost = (self.SPREAD_SLIPPAGE * self.POINT_VALUE) + self.COMMISSION
                 if outcome == 'WIN':
-                    total_pnl += (pnl_pts * self.POINT_VALUE) - self.COMMISSION
+                    trade_pnl = (pnl_pts * self.POINT_VALUE) - entry_cost
+                    total_pnl += trade_pnl
                     wins += 1
+                    actual_win_pnl += trade_pnl
                 elif outcome == 'LOSS':
-                    total_pnl += (pnl_pts * self.POINT_VALUE) - self.COMMISSION - (self.SPREAD_SLIPPAGE * self.POINT_VALUE)
+                    trade_pnl = (pnl_pts * self.POINT_VALUE) - entry_cost
+                    total_pnl += trade_pnl
                     losses += 1
+                    actual_loss_pnl += abs(trade_pnl)
             
             trades = wins + losses
-            gross_profit = wins * ((c_tp * self.POINT_VALUE) - self.COMMISSION)
-            gross_loss = losses * ((c_sl * self.POINT_VALUE) + self.COMMISSION)
-            pf = gross_profit / (gross_loss + 0.001) if gross_loss > 0 else gross_profit
+            # Use ACTUAL Profit Factor from real trade PnL
+            pf = actual_win_pnl / (actual_loss_pnl + 0.001) if actual_loss_pnl > 0 else actual_win_pnl
             
             score = total_pnl
             if pf < 1.3: score -= 1e6
@@ -528,7 +560,7 @@ def run_overnight():
     for kz_name, kz_cfg in KILL_ZONES.items():
         try:
             SESSIONS[kz_name] = kz_cfg  # Temporarily add
-            miner = SessionGeneticMiner(train_df, kz_name, population_size=10000, generations=100)
+            miner = SessionGeneticMiner(train_df, kz_name, population_size=10000, generations=100, tick_df=tick_df)
             results = miner.run()
             all_results.extend(results)
             log(f"  {kz_name}: Found {len(results)} strategies")
@@ -556,7 +588,7 @@ def run_overnight():
             log(f"  Testing {day_name}: {len(day_df):,} bars")
             
             # Use IB session as base
-            miner = SessionGeneticMiner(day_df, 'ib', population_size=8000, generations=80)
+            miner = SessionGeneticMiner(day_df, 'ib', population_size=8000, generations=80, tick_df=tick_df)
             results = miner.run()
             for r in results:
                 r['day'] = day_name  # Tag with day
@@ -586,7 +618,7 @@ def run_overnight():
             log(f"  Displacement >{disp_threshold*100:.0f}%: {len(disp_df):,} bars")
             
             if len(disp_df) > 1000:
-                miner = SessionGeneticMiner(disp_df, 'us_open', population_size=8000, generations=80)
+                miner = SessionGeneticMiner(disp_df, 'us_open', population_size=8000, generations=80, tick_df=tick_df)
                 results = miner.run()
                 for r in results:
                     r['filter'] = f'displacement>{disp_threshold}'
@@ -625,7 +657,7 @@ def run_overnight():
             log(f"  {sweep_type}: {len(sweep_df):,} bars")
             
             if len(sweep_df) > 500:
-                miner = SessionGeneticMiner(sweep_df, 'us_open', population_size=8000, generations=80)
+                miner = SessionGeneticMiner(sweep_df, 'us_open', population_size=8000, generations=80, tick_df=tick_df)
                 results = miner.run()
                 for r in results:
                     r['filter'] = sweep_type
@@ -661,7 +693,7 @@ def run_overnight():
         log(f"  Round Number Crosses: {len(round_df):,} bars")
         
         if len(round_df) > 500:
-            miner = SessionGeneticMiner(round_df, 'us_open', population_size=8000, generations=80)
+            miner = SessionGeneticMiner(round_df, 'us_open', population_size=8000, generations=80, tick_df=tick_df)
             results = miner.run()
             for r in results:
                 r['filter'] = 'Round_Number'
@@ -701,7 +733,7 @@ def run_overnight():
             log(f"  {sweep_type}: {len(sweep_df):,} bars")
             
             if len(sweep_df) > 300: # Fewer weekly sweeps usually
-                miner = SessionGeneticMiner(sweep_df, 'us_open', population_size=8000, generations=80)
+                miner = SessionGeneticMiner(sweep_df, 'us_open', population_size=8000, generations=80, tick_df=tick_df)
                 results = miner.run()
                 for r in results:
                     r['filter'] = sweep_type
@@ -729,7 +761,7 @@ def run_overnight():
     log(f"  High Volatility Regime: {len(high_vol_df):,} bars")
     
     try:
-        miner = SessionGeneticMiner(high_vol_df, 'us_open', population_size=10000, generations=100)
+        miner = SessionGeneticMiner(high_vol_df, 'us_open', population_size=10000, generations=100, tick_df=tick_df)
         results = miner.run()
         for r in results:
             r['regime'] = 'high_volatility'
@@ -742,7 +774,7 @@ def run_overnight():
     log(f"  Low Volatility Regime: {len(low_vol_df):,} bars")
     
     try:
-        miner = SessionGeneticMiner(low_vol_df, 'us_open', population_size=10000, generations=100)
+        miner = SessionGeneticMiner(low_vol_df, 'us_open', population_size=10000, generations=100, tick_df=tick_df)
         results = miner.run()
         for r in results:
             r['regime'] = 'low_volatility'
@@ -769,7 +801,7 @@ def run_overnight():
     log(f"  Extended from Mean: {len(extended_df):,} bars")
     
     try:
-        miner = SessionGeneticMiner(extended_df, 'us_open', population_size=10000, generations=100)
+        miner = SessionGeneticMiner(extended_df, 'us_open', population_size=10000, generations=100, tick_df=tick_df)
         results = miner.run()
         for r in results:
             r['strategy_type'] = 'mean_reversion'
@@ -782,7 +814,7 @@ def run_overnight():
     log(f"  Close to Mean: {len(close_to_mean_df):,} bars")
     
     try:
-        miner = SessionGeneticMiner(close_to_mean_df, 'us_open', population_size=10000, generations=100)
+        miner = SessionGeneticMiner(close_to_mean_df, 'us_open', population_size=10000, generations=100, tick_df=tick_df)
         results = miner.run()
         for r in results:
             r['strategy_type'] = 'trend_breakout'
@@ -810,7 +842,7 @@ def run_overnight():
     for ib_name, ib_cfg in IB_WINDOWS:
         try:
             SESSIONS[ib_name] = ib_cfg
-            miner = SessionGeneticMiner(train_df, ib_name, population_size=10000, generations=120)
+            miner = SessionGeneticMiner(train_df, ib_name, population_size=10000, generations=120, tick_df=tick_df)
             results = miner.run()
             for r in results:
                 r['ib_type'] = ib_name
@@ -842,7 +874,7 @@ def run_overnight():
     log(f"  Pin Bars: {len(pin_bars):,} bars")
     
     try:
-        miner = SessionGeneticMiner(pin_bars, 'us_open', population_size=8000, generations=80)
+        miner = SessionGeneticMiner(pin_bars, 'us_open', population_size=8000, generations=80, tick_df=tick_df)
         results = miner.run()
         for r in results:
             r['pattern'] = 'pin_bar'
@@ -856,7 +888,7 @@ def run_overnight():
     log(f"  Engulfing Candles: {len(engulfing):,} bars")
     
     try:
-        miner = SessionGeneticMiner(engulfing, 'us_open', population_size=8000, generations=80)
+        miner = SessionGeneticMiner(engulfing, 'us_open', population_size=8000, generations=80, tick_df=tick_df)
         results = miner.run()
         for r in results:
             r['pattern'] = 'engulfing'
@@ -890,7 +922,7 @@ def run_overnight():
         if best_session in SESSIONS:
             log(f"  Deep diving: {best_session}")
             try:
-                miner = SessionGeneticMiner(train_df, best_session, population_size=10000, generations=100)
+                miner = SessionGeneticMiner(train_df, best_session, population_size=10000, generations=100, tick_df=tick_df)
                 deep_results = miner.run()
                 all_results.extend(deep_results)
             except Exception as e:
@@ -917,7 +949,7 @@ def run_overnight():
                 continue
                 
             # Run same strategy on TEST data
-            test_miner = SessionGeneticMiner(test_df, session, population_size=100, generations=1)
+            test_miner = SessionGeneticMiner(test_df, session, population_size=100, generations=1, tick_df=tick_df)
             
             # We'll just check if the strategy performs similarly
             # For now, log the session coverage
