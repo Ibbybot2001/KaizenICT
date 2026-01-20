@@ -8,6 +8,18 @@ An institutional-grade, fully autonomous trading suite for **MNQ** (Nasdaq-100 M
 
 ---
 
+## 🎯 MISSION VISION
+We are building a **High-Frequency Institutional Trading Swarm**. The system is designed to autonomously discover, validate, and execute ICT-based liquidity strategies on the Nasdaq-100 (MNQ). 
+
+**The Core Concept**: Rather than relying on a single stagnant strategy, we use a GPU-accelerated "Genetic Miner" to constantly evolve new filters (Kill Zones, Day-of-Week, Momentum, Level Sweeps) and graduate the survivors into a 100% uptime, self-healing live execution environment.
+
+---
+
+## 🛠️ THE PRODUCTION STACK
+This repository contains a multi-layered, self-healing execution environment for MNQ (Nasdaq-100 Micros). 
+
+---
+
 ## 🏗️ 4-Layer Architecture
 
 The system is built on a "Brutal Realism" philosophy, moving from raw market data to validated alpha in four distinct stages:

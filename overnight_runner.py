@@ -546,6 +546,82 @@ def run_overnight():
         except Exception as e:
             log(f"  {sweep_type}: ERROR - {e}")
         gc.collect()
+
+    # ========================================================================
+    # PHASE 5b: Round Number Sweeps (Psychological Levels)
+    # ========================================================================
+    log("\n" + "=" * 60)
+    log("PHASE 5b: Round Number Sweep Detection")
+    log("=" * 60)
+    
+    check_ram_and_throttle()
+    
+    # MNQ levels typically 100, 250, 500, 750, 1000
+    df_round = train_df.copy()
+    levels = []
+    base_price = int(df_round['close'].iloc[0] / 1000) * 1000
+    for offset in range(-2000, 2000, 100):
+        levels.append(base_price + offset)
+    
+    # Find bars that cross a round level
+    df_round['sweep_round'] = False
+    for level in levels:
+        # Crosses from below or above
+        df_round['sweep_round'] |= (df_round['low'] <= level) & (df_round['high'] >= level)
+    
+    try:
+        round_df = df_round[df_round['sweep_round']]
+        log(f"  Round Number Crosses: {len(round_df):,} bars")
+        
+        if len(round_df) > 500:
+            miner = SessionGeneticMiner(round_df, 'us_open', population_size=8000, generations=80)
+            results = miner.run()
+            for r in results:
+                r['filter'] = 'Round_Number'
+            all_results.extend(results)
+    except Exception as e:
+        log(f"  Round Number Sweep: ERROR - {e}")
+    gc.collect()
+
+    # ========================================================================
+    # PHASE 5c: Previous Week Level Sweeps
+    # ========================================================================
+    log("\n" + "=" * 60)
+    log("PHASE 5c: Previous Week High/Low Sweep Detection")
+    log("=" * 60)
+    
+    check_ram_and_throttle()
+    
+    df_pw = train_df.copy()
+    # Weekly resample manually to get prev week high/low
+    df_pw['week_id'] = pd.to_datetime(df_pw.index).isocalendar().week
+    df_pw['year_id'] = pd.to_datetime(df_pw.index).isocalendar().year
+    
+    weekly = df_pw.groupby(['year_id', 'week_id']).agg({'high': 'max', 'low': 'min'})
+    # Shift to get previous week
+    weekly['pwh'] = weekly['high'].shift(1)
+    weekly['pwl'] = weekly['low'].shift(1)
+    
+    df_pw = df_pw.merge(weekly[['pwh', 'pwl']], left_on=['year_id', 'week_id'], right_index=True, how='left')
+    df_pw = df_pw.dropna()
+    
+    df_pw['sweep_pwh'] = df_pw['high'] > df_pw['pwh']
+    df_pw['sweep_pwl'] = df_pw['low'] < df_pw['pwl']
+    
+    for sweep_type, col in [('PWH_Sweep', 'sweep_pwh'), ('PWL_Sweep', 'sweep_pwl')]:
+        try:
+            sweep_df = df_pw[df_pw[col]]
+            log(f"  {sweep_type}: {len(sweep_df):,} bars")
+            
+            if len(sweep_df) > 300: # Fewer weekly sweeps usually
+                miner = SessionGeneticMiner(sweep_df, 'us_open', population_size=8000, generations=80)
+                results = miner.run()
+                for r in results:
+                    r['filter'] = sweep_type
+                all_results.extend(results)
+        except Exception as e:
+            log(f"  {sweep_type}: ERROR - {e}")
+        gc.collect()
     
     # ========================================================================
     # PHASE 6: Volatility Regime Detection
