@@ -1004,7 +1004,7 @@ def run_overnight():
     
     check_ram_and_throttle()
     
-    # Take top 50 strategies from training and validate on test data
+    # Take top 50 strategies from training
     top_candidates = all_results[:50]
     
     for i, strat in enumerate(top_candidates):
@@ -1012,21 +1012,46 @@ def run_overnight():
             session = strat.get('session', 'us_open')
             if session not in SESSIONS:
                 continue
-                
-            # Run same strategy on TEST data
-            test_miner = SessionGeneticMiner(test_df, session, population_size=100, generations=1, tick_df=tick_df)
             
-            # We'll just check if the strategy performs similarly
-            # For now, log the session coverage
-            if i < 10:
-                log(f"  Validating #{i+1}: {session} SL:{strat['sl']} TP:{strat['tp']}")
-                strat['validated'] = True
-                strat['test_months'] = test_months
+            # PROPER OOS VALIDATION: Create miner on TEST data
+            test_miner = SessionGeneticMiner(test_df, session, population_size=1, generations=1, tick_df=tick_df)
+            
+            # Build population tensor from discovered strategy params
+            strat_tensor = torch.tensor([[
+                strat['sl'], strat['tp'], strat['body'],
+                strat['wick'], strat['fvg'], strat['vol']
+            ]], dtype=torch.float32, device=DEVICE)
+            
+            # Evaluate THIS strategy on TEST data
+            test_scores, test_trades = test_miner.evaluate_v5(strat_tensor)
+            test_score = test_scores[0].item()
+            test_trade_count = test_trades[0].item()
+            
+            # Store OOS results
+            strat['test_score'] = test_score
+            strat['test_trades'] = test_trade_count
+            strat['validated'] = test_score > 0 and test_trade_count >= 10
+            strat['test_months'] = test_months
+            
+            # Calculate degradation (how much worse on test vs train)
+            train_score = strat.get('score', 0)
+            if train_score > 0:
+                strat['degradation'] = 1 - (test_score / train_score)
+            else:
+                strat['degradation'] = 1.0
+            
+            if strat['validated']:
                 validated_results.append(strat)
-        except:
-            pass
+            
+            if i < 10:
+                status = "✅ PASS" if strat['validated'] else "❌ FAIL"
+                log(f"  #{i+1} {session} SL:{strat['sl']:.0f} TP:{strat['tp']:.0f} | "
+                    f"Train:{train_score:.0f} Test:{test_score:.0f} | "
+                    f"Trades:{test_trade_count:.0f} | {status}")
+        except Exception as e:
+            log(f"  Validation error for strategy #{i+1}: {e}")
     
-    log(f"  Validated {len(validated_results)} strategies on unseen data")
+    log(f"  ✅ Validated {len(validated_results)}/{len(top_candidates)} strategies on unseen data")
     
     # ========================================================================
     # SAVE RESULTS
