@@ -238,8 +238,10 @@ def load_train_test_data():
         """Add indicators using ONLY data from this split."""
         df = df.sort_index().copy()
         df['sma200'] = df['close'].rolling(200, min_periods=200).mean()
-        df['roll_min'] = df['low'].rolling(60, min_periods=60).min()
-        df['roll_max'] = df['high'].rolling(60, min_periods=60).max()
+        # CRITICAL FIX: Shift by 1 so we compare to PREVIOUS 60-bar extremes
+        # This enables sweep detection (low < prior min, high > prior max)
+        df['roll_min'] = df['low'].rolling(60, min_periods=60).min().shift(1)
+        df['roll_max'] = df['high'].rolling(60, min_periods=60).max().shift(1)
         
         # Volume handling
         if 'volume' not in df.columns or df['volume'].sum() < 1.0:
@@ -490,8 +492,9 @@ class SessionGeneticMiner:
             if trades > 500: score *= 0.9  # Slight penalty for overtrading
             if pf > 3.0: score *= 0.95  # Suspiciously high PF might be overfit
             
-            scores[strat_idx] = score
-            trade_counts[strat_idx] = trades
+            # Fix: Cast to float to avoid TypeError with numpy types on CUDA
+            scores[strat_idx] = float(score)
+            trade_counts[strat_idx] = float(trades)
             
             if strat_idx > 0 and strat_idx % 100 == 0:
                 log(f"      V5 Progress: {strat_idx}/{pop_size}")
