@@ -462,40 +462,26 @@ class GoldenBot:
                 df['IB_H'] = 0
                 df['IB_L'] = 0
             
-            # 2. ASIA Levels (18:00 Prev - 00:00 Today)
-            # Simplistic: Just look at 18-00 in the last 24h window
-            # Harder in live stream. We can just take lookback?
-            # Let's use strict time:
-            # Asia is 18:00 (D-1) -> 00:00 (D)
-            # Find the most recent completed Asia session
-            
-            # If current time > 00:00 today, Asia was yesterday 18:00 to today 00:00
-            # Since we have 2 days data, we can filter for that window
-            
-            # Construct Asia Start/End logic?
-            # Shortcut: Use fixed hour checks on the full dataframe
-            asia_mask = (df['hour'] >= 18) | (df['hour'] < 0) # 0 is midnight?
-            # This is tricky with rolling.
-            # Alternative: Use simple rolling min/max of ~6 hours if in morning?
-            # Standard: 18:00 - 00:00.
-            
-            # Let's isolate the 'Last Asia Session' based on current time
-            # If now is 10:00 AM, Asia ended 10 hours ago via midnight.
-            
-            # Filter for last 24h
-            last_24h = df.iloc[-1440:] 
-            asia_session = last_24h[ (last_24h['hour'] >= 18) | (last_24h['hour'] < 0) ] # <0? No, 0-23.
-            # Asia: 18, 19, 20, 21, 22, 23. (Start 18:00, End 00:00 aka 23:59)
-            
-            asia_bars = last_24h[ (last_24h['hour'] >= 18) ]
-            # Note: This ignores the 00:00 bar if it exists? Usually Asia end is New Day Open.
+            # 2. ASIA Levels (Most recent 18:00 - 00:00 window)
+            # Find bars from the most recent session starting at 18:00
+            asia_mask = (df['hour'] >= 18)
+            asia_bars = df[asia_mask]
             
             if not asia_bars.empty:
-                df['ASIA_H'] = asia_bars['high'].max()
-                df['ASIA_L'] = asia_bars['low'].min()
+                last_asia_date = asia_bars['date_only'].iloc[-1]
+                latest_asia_bars = asia_bars[asia_bars['date_only'] == last_asia_date]
+                df['ASIA_H'] = latest_asia_bars['high'].max()
+                df['ASIA_L'] = latest_asia_bars['low'].min()
             else:
-                df['ASIA_H'] = 0
-                df['ASIA_L'] = 0
+                # Fallback: If no 18:00 bars today, look for any bars before 09:30 
+                # (which would be the tail end of the overnight Asia session)
+                pre_market = df[df['hour'] < 9]
+                if not pre_market.empty:
+                    df['ASIA_H'] = pre_market['high'].max()
+                    df['ASIA_L'] = pre_market['low'].min()
+                else:
+                    df['ASIA_H'] = 0
+                    df['ASIA_L'] = 0
             
             # 3. WEEKLY Levels (Across the full 1-Week dataframe)
             df['WEEK_H'] = df['high'].max()
