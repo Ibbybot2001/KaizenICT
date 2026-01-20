@@ -33,6 +33,13 @@ DATA_DIR = BASE_DIR / "data/GOLDEN_DATA/USTEC_2025_GOLDEN_PARQUET"
 OUTPUT_DIR = BASE_DIR / "overnight_results"
 OUTPUT_DIR.mkdir(exist_ok=True)
 
+# Desktop Backup Directory
+DESKTOP_DIR = Path("C:/Users/CEO/Desktop/V5_ENGINE_RESULTS")
+DESKTOP_DIR_WINNERS = DESKTOP_DIR / "WINNERS"
+DESKTOP_DIR_LOGS = DESKTOP_DIR / "ENGINE_LOGS"
+DESKTOP_DIR_WINNERS.mkdir(parents=True, exist_ok=True)
+DESKTOP_DIR_LOGS.mkdir(parents=True, exist_ok=True)
+
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # Data Mode: Use tick data for accurate SL/TP resolution
@@ -81,43 +88,91 @@ def load_tick_data():
     log(f"Tick Data Ready: {len(tick_df):,} total ticks")
     return tick_df
 
-def resolve_outcome_ticks(tick_df, entry_time, entry_price, sl_pts, tp_pts, direction):
+
+def resolve_outcome_ticks(tick_times, tick_prices, entry_time_val, entry_price, sl_pts, tp_pts, direction):
     """
-    V5 PURE TICK RESOLUTION - Iterate through ticks to find which level hit first.
-    Returns: (outcome, pnl_points) where outcome is 'WIN', 'LOSS', or 'TIMEOUT'
+    V5 PURE TICK RESOLUTION (NUMPY OPTIMIZED)
+    High-performance tick check using numpy arrays instead of pandas iterrows.
+    
+    Args:
+        tick_times: np.array of tick timestamps (int64 nanoseconds)
+        tick_prices: np.array of tick prices (float32)
+        entry_time_val: entry timestamp (int64 nanoseconds)
+        entry_price: float entry price
+        sl_pts: stop loss points
+        tp_pts: take profit points
+        direction: 'LONG' or 'SHORT'
     """
-    try:
-        future_ticks = tick_df.loc[entry_time:].iloc[1:]
-    except:
+    # 1. Find start index using binary search (O(log n))
+    start_idx = np.searchsorted(tick_times, entry_time_val, side='right')
+    
+    if start_idx >= len(tick_times):
         return 'TIMEOUT', 0
-    
-    if len(future_ticks) == 0:
-        return 'TIMEOUT', 0
-    
-    sl_price = entry_price - sl_pts if direction == 'LONG' else entry_price + sl_pts
-    tp_price = entry_price + tp_pts if direction == 'LONG' else entry_price - tp_pts
-    
-    for tick_time, tick in future_ticks.iterrows():
-        price = tick.get('price', tick.get('last', None))
-        if price is None or pd.isna(price):
-            continue
-            
-        time_diff = (tick_time - entry_time).total_seconds()
-        if time_diff > TRADE_TIMEOUT_SECONDS:
-            return 'TIMEOUT', 0
         
-        if direction == 'LONG':
-            if price >= tp_price:
-                return 'WIN', tp_pts
-            if price <= sl_price:
-                return 'LOSS', -sl_pts
-        else:
-            if price <= tp_price:
-                return 'WIN', tp_pts
-            if price >= sl_price:
-                return 'LOSS', -sl_pts
+    # 2. Slice future ticks (numpy view, zero copy)
+    # Limit max checks to avoid scanning millions of ticks unnecessarily
+    # Assuming 100k ticks is enough to hit SL/TP or timeout
+    max_lookahead = 100000 
+    end_idx = min(len(tick_times), start_idx + max_lookahead)
     
+    future_times = tick_times[start_idx:end_idx]
+    future_prices = tick_prices[start_idx:end_idx]
+    
+    if len(future_prices) == 0:
+        return 'TIMEOUT', 0
+        
+    # 3. Define levels
+    if direction == 'LONG':
+        tp_price = entry_price + tp_pts
+        sl_price = entry_price - sl_pts
+        
+        # Vectorized check: Find first index where price hits TP or SL
+        # We need the FIRST event in time order
+        
+        # Boolean masks
+        hit_tp = future_prices >= tp_price
+        hit_sl = future_prices <= sl_price
+        
+        # Get indices where events happen
+        tp_indices = np.where(hit_tp)[0]
+        sl_indices = np.where(hit_sl)[0]
+        
+        first_tp = tp_indices[0] if len(tp_indices) > 0 else 999999999
+        first_sl = sl_indices[0] if len(sl_indices) > 0 else 999999999
+        
+        if first_tp < first_sl:
+            return 'WIN', tp_pts
+        elif first_sl < first_tp:
+            return 'LOSS', -sl_pts
+            
+    else: # SHORT
+        tp_price = entry_price - tp_pts
+        sl_price = entry_price + sl_pts
+        
+        hit_tp = future_prices <= tp_price
+        hit_sl = future_prices >= sl_price
+        
+        tp_indices = np.where(hit_tp)[0]
+        sl_indices = np.where(hit_sl)[0]
+        
+        first_tp = tp_indices[0] if len(tp_indices) > 0 else 999999999
+        first_sl = sl_indices[0] if len(sl_indices) > 0 else 999999999
+        
+        if first_tp < first_sl:
+            return 'WIN', tp_pts
+        elif first_sl < first_tp:
+            return 'LOSS', -sl_pts
+            
+    # 4. Check Timeout
+    # If checked all ticks in slice and no hit, check time of last tick
+    if len(future_times) > 0:
+        last_time = future_times[-1]
+        loss_seconds = (last_time - entry_time_val) / 1e9 # ns to seconds
+        if loss_seconds > TRADE_TIMEOUT_SECONDS:
+            return 'TIMEOUT', 0
+            
     return 'TIMEOUT', 0
+
 
 def check_ram_and_throttle():
     """Check RAM usage and throttle if approaching limit."""
@@ -175,8 +230,16 @@ def log(msg):
     ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     formatted = f"[{ts}] {msg}"
     print(formatted)
-    with open(log_file, 'a', encoding='utf-8') as f:
-        f.write(formatted + "\n")
+    try:
+        # Local Log
+        with open(log_file, 'a', encoding='utf-8') as f:
+            f.write(formatted + "\n")
+        # Desktop Log
+        desktop_log = DESKTOP_DIR_LOGS / log_file.name
+        with open(desktop_log, 'a', encoding='utf-8') as f:
+            f.write(formatted + "\n")
+    except:
+        pass
 
 # ============================================================================
 # DATA LOADER
@@ -280,6 +343,14 @@ class SessionGeneticMiner:
         self.generations = generations
         self.df = df
         self.tick_df = tick_df  # V5: Tick data for precise SL/TP resolution
+        
+        # Optimize tick data for numpy fast access
+        if tick_df is not None:
+            self.tick_times = tick_df.index.astype(np.int64).values
+            self.tick_prices = (tick_df['price'].values if 'price' in tick_df.columns else tick_df['last'].values).astype(np.float32)
+        else:
+            self.tick_times = None
+            self.tick_prices = None
         
         # Constants
         self.POINT_VALUE = POINT_VALUE
@@ -435,9 +506,9 @@ class SessionGeneticMiner:
                 entry_price = open_prices[entry_bar_idx]
                 entry_time = bar_times[entry_bar_idx]
                 
-                # Resolve outcome using tick data
+                # Resolve outcome using numpy tick data
                 outcome, pnl_pts = resolve_outcome_ticks(
-                    self.tick_df, entry_time, entry_price, c_sl, c_tp, direction
+                    self.tick_times, self.tick_prices, entry_time.value, entry_price, c_sl, c_tp, direction
                 )
                 
                 in_position = True
@@ -1067,21 +1138,41 @@ def run_overnight():
     all_results.sort(key=lambda x: x['score'], reverse=True)
     
     # Save to JSON
-    results_file = OUTPUT_DIR / f"overnight_strategies_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    ts_str = datetime.now().strftime('%Y%m%d_%H%M%S')
+    results_file = OUTPUT_DIR / f"overnight_strategies_{ts_str}.json"
     with open(results_file, 'w') as f:
         json.dump(all_results, f, indent=2)
+    
+    # Desktop Copy
+    try:
+        import shutil
+        shutil.copy(results_file, DESKTOP_DIR_WINNERS / results_file.name)
+    except: pass
+    
     log(f"Saved {len(all_results)} strategies to {results_file}")
     
     # Save validated separately
-    validated_file = OUTPUT_DIR / f"validated_strategies_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    validated_file = OUTPUT_DIR / f"validated_strategies_{ts_str}.json"
     with open(validated_file, 'w') as f:
         json.dump(validated_results, f, indent=2)
+        
+    # Desktop Copy
+    try:
+        shutil.copy(validated_file, DESKTOP_DIR_WINNERS / validated_file.name)
+    except: pass
+
     log(f"Saved {len(validated_results)} VALIDATED strategies to {validated_file}")
     
     # Save summary CSV
-    summary_file = OUTPUT_DIR / f"overnight_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    summary_file = OUTPUT_DIR / f"overnight_summary_{ts_str}.csv"
     summary_df = pd.DataFrame(all_results)
     summary_df.to_csv(summary_file, index=False)
+    
+    # Desktop Copy
+    try:
+        shutil.copy(summary_file, DESKTOP_DIR_WINNERS / summary_file.name)
+    except: pass
+    
     log(f"Saved summary to {summary_file}")
     
     # Print top 20
