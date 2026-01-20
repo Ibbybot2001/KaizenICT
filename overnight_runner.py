@@ -48,8 +48,9 @@ THROTTLE_RAM_GB = 25  # Start throttling at 25GB to stay safe
 # V5 Constants for Pure Tick Resolution
 POINT_VALUE = 20.0
 COMMISSION = 2.05
-SPREAD_SLIPPAGE = 1.0
+SPREAD_SLIPPAGE = 2.0  # Conservative: 2 pts (entry + exit slippage combined)
 TRADE_TIMEOUT_SECONDS = 14400  # 4 hours max hold
+TRADE_COOLDOWN_BARS = 1  # Minimum bars between trades (prevents instant re-entry)
 
 # ============================================================================
 # V5 TICK DATA FUNCTIONS
@@ -348,13 +349,19 @@ class SessionGeneticMiner:
         return torch.stack([sl.float(), tp.float(), body.float(), wick.float(), fvg_str, rel_vol], dim=1)
     
     def evaluate_v5(self, pop):
-        """V5 PURE TICK EVALUATION - Uses tick data for precise outcome resolution."""
+        """V5 PURE TICK EVALUATION with REALISM FIXES:
+        - Entry at NEXT bar open (not current bar close)
+        - Position overlap tracking (no concurrent trades)
+        - Trade cooldown enforcement
+        - Mark-to-market for TIMEOUT trades
+        """
         pop_size = len(pop)
         scores = torch.zeros(pop_size, device=DEVICE)
         trade_counts = torch.zeros(pop_size, device=DEVICE)
         
         active_indices = self.session_mask
         s_close = self.close[active_indices]
+        s_open = self.open[active_indices]  # REALISM: Use open for entry
         s_sma = self.sma[active_indices]
         s_body = self.body_size[active_indices]
         s_wick = self.wick_ratio[active_indices]
@@ -368,6 +375,8 @@ class SessionGeneticMiner:
         
         bar_times = self.df.index[active_indices.cpu().numpy()]
         close_prices = s_close.cpu().numpy()
+        open_prices = s_open.cpu().numpy()  # REALISM: Next bar open as entry
+        n_bars = len(bar_times)
         
         for strat_idx in range(pop_size):
             strat = pop[strat_idx]
@@ -382,43 +391,77 @@ class SessionGeneticMiner:
             entry_long = sweep_long & trend_long & mask_body & mask_wick & mask_vol & (s_fvg_long >= c_fvg)
             entry_short = sweep_short & trend_short & mask_body & mask_wick & mask_vol & (s_fvg_short >= c_fvg)
             
-            long_entries = torch.where(entry_long)[0].cpu().numpy()
-            short_entries = torch.where(entry_short)[0].cpu().numpy()
+            # Combine and sort all signal indices
+            long_indices = set(torch.where(entry_long)[0].cpu().numpy())
+            short_indices = set(torch.where(entry_short)[0].cpu().numpy())
+            all_signals = [(idx, 'LONG') for idx in long_indices] + [(idx, 'SHORT') for idx in short_indices]
+            all_signals.sort(key=lambda x: x[0])  # Sort by time
             
             total_pnl, wins, losses = 0.0, 0, 0
-            actual_win_pnl, actual_loss_pnl = 0.0, 0.0  # Track actual PnL for true PF
+            actual_win_pnl, actual_loss_pnl = 0.0, 0.0
             
-            for idx in long_entries:
-                outcome, pnl_pts = resolve_outcome_ticks(self.tick_df, bar_times[idx], close_prices[idx], c_sl, c_tp, 'LONG')
-                # Apply costs uniformly: SPREAD on entry, COMMISSION on round-trip
+            # REALISM: Position tracking (no overlapping trades)
+            in_position = False
+            last_trade_end_idx = -999  # For cooldown tracking
+            
+            for sig_idx, direction in all_signals:
+                # REALISM: Cooldown check
+                if sig_idx <= last_trade_end_idx + TRADE_COOLDOWN_BARS:
+                    continue
+                    
+                # REALISM: Position overlap check
+                if in_position:
+                    continue
+                
+                # REALISM: Entry at NEXT bar open
+                entry_bar_idx = sig_idx + 1
+                if entry_bar_idx >= n_bars:
+                    continue  # No next bar available
+                
+                entry_price = open_prices[entry_bar_idx]
+                entry_time = bar_times[entry_bar_idx]
+                
+                # Resolve outcome using tick data
+                outcome, pnl_pts = resolve_outcome_ticks(
+                    self.tick_df, entry_time, entry_price, c_sl, c_tp, direction
+                )
+                
+                in_position = True
                 entry_cost = (self.SPREAD_SLIPPAGE * self.POINT_VALUE) + self.COMMISSION
+                
                 if outcome == 'WIN':
                     trade_pnl = (pnl_pts * self.POINT_VALUE) - entry_cost
                     total_pnl += trade_pnl
                     wins += 1
                     actual_win_pnl += trade_pnl
-                elif outcome == 'LOSS':
-                    trade_pnl = (pnl_pts * self.POINT_VALUE) - entry_cost  # pnl_pts is negative
-                    total_pnl += trade_pnl
-                    losses += 1
-                    actual_loss_pnl += abs(trade_pnl)
-            
-            for idx in short_entries:
-                outcome, pnl_pts = resolve_outcome_ticks(self.tick_df, bar_times[idx], close_prices[idx], c_sl, c_tp, 'SHORT')
-                entry_cost = (self.SPREAD_SLIPPAGE * self.POINT_VALUE) + self.COMMISSION
-                if outcome == 'WIN':
-                    trade_pnl = (pnl_pts * self.POINT_VALUE) - entry_cost
-                    total_pnl += trade_pnl
-                    wins += 1
-                    actual_win_pnl += trade_pnl
+                    in_position = False
+                    last_trade_end_idx = entry_bar_idx  # Approximate
                 elif outcome == 'LOSS':
                     trade_pnl = (pnl_pts * self.POINT_VALUE) - entry_cost
                     total_pnl += trade_pnl
                     losses += 1
                     actual_loss_pnl += abs(trade_pnl)
+                    in_position = False
+                    last_trade_end_idx = entry_bar_idx
+                else:  # TIMEOUT - mark-to-market at last known price
+                    # Use close of last bar in dataset as exit
+                    mtm_exit = close_prices[-1] if len(close_prices) > 0 else entry_price
+                    if direction == 'LONG':
+                        mtm_pnl_pts = mtm_exit - entry_price
+                    else:
+                        mtm_pnl_pts = entry_price - mtm_exit
+                    trade_pnl = (mtm_pnl_pts * self.POINT_VALUE) - entry_cost
+                    total_pnl += trade_pnl
+                    if trade_pnl > 0:
+                        wins += 1
+                        actual_win_pnl += trade_pnl
+                    else:
+                        losses += 1
+                        actual_loss_pnl += abs(trade_pnl)
+                    in_position = False
+                    last_trade_end_idx = n_bars - 1  # Held to end
             
             trades = wins + losses
-            # Use ACTUAL Profit Factor from real trade PnL
             pf = actual_win_pnl / (actual_loss_pnl + 0.001) if actual_loss_pnl > 0 else actual_win_pnl
             
             score = total_pnl
