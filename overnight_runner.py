@@ -200,8 +200,7 @@ def load_all_data():
 def load_train_test_data():
     """
     Load data with RANDOM 70/30 train/test split.
-    NOT sequential - random months to avoid temporal bias.
-    IMPORTANT: Calculates indicators on FULL data before split to avoid boundary discontinuities.
+    CRITICAL FIX: Indicators calculated SEPARATELY on train/test to prevent leakage.
     """
     log("Loading data with random 70/30 train/test split...")
     
@@ -220,43 +219,51 @@ def load_train_test_data():
     log(f"  TRAIN months: {train_months}")
     log(f"  TEST months: {test_months}")
     
-    # Load ALL data first
-    all_dfs = []
+    # Load and split FIRST (no indicator contamination)
+    train_dfs = []
+    test_dfs = []
     for month in range(1, 13):
         file_path = DATA_DIR / f"USTEC_2025-{month:02d}_clean_1m.parquet"
         if file_path.exists():
             df = pd.read_parquet(file_path)
-            all_dfs.append(df)
-            log(f"  Loaded {file_path.name}: {len(df):,} bars")
+            if month in train_months:
+                train_dfs.append(df)
+                log(f"  TRAIN: Loaded {file_path.name}: {len(df):,} bars")
+            else:
+                test_dfs.append(df)
+                log(f"  TEST: Loaded {file_path.name}: {len(df):,} bars")
     
-    # Combine and calculate indicators on CONTINUOUS data
-    combined = pd.concat(all_dfs).sort_index()
-    log(f"  Calculating Indicators (SMA, Liquidity, Vol)...")
+    # Calculate indicators SEPARATELY (no leakage between train/test)
+    def add_indicators(df):
+        """Add indicators using ONLY data from this split."""
+        df = df.sort_index().copy()
+        df['sma200'] = df['close'].rolling(200, min_periods=200).mean()
+        df['roll_min'] = df['low'].rolling(60, min_periods=60).min()
+        df['roll_max'] = df['high'].rolling(60, min_periods=60).max()
+        
+        # Volume handling
+        if 'volume' not in df.columns or df['volume'].sum() < 1.0:
+            if 'tick_volume' in df.columns:
+                df['volume'] = df['tick_volume']
+            else:
+                df['volume'] = 1.0
+        
+        vol_ma = df['volume'].rolling(20, min_periods=1).mean()
+        df['rel_vol'] = df['volume'] / (vol_ma + 1e-9)
+        
+        # Drop NaN rows from indicator warmup
+        df = df.dropna(subset=['sma200', 'roll_min', 'roll_max'])
+        return df
     
-    combined['sma200'] = combined['close'].rolling(200, min_periods=200).mean()
-    combined['roll_min'] = combined['low'].rolling(60, min_periods=60).min()
-    combined['roll_max'] = combined['high'].rolling(60, min_periods=60).max()
+    # Apply indicators SEPARATELY to prevent train/test contamination
+    log(f"  Calculating indicators on TRAIN only...")
+    train_df = add_indicators(pd.concat(train_dfs))
     
-    # Volume handling - use tick_volume if volume is missing or zero
-    if 'volume' not in combined.columns or combined['volume'].sum() < 1.0:
-        if 'tick_volume' in combined.columns:
-            combined['volume'] = combined['tick_volume']
-        else:
-            combined['volume'] = 1.0  # Fallback
+    log(f"  Calculating indicators on TEST only (no leakage)...")
+    test_df = add_indicators(pd.concat(test_dfs))
     
-    vol_ma = combined['volume'].rolling(20, min_periods=1).mean()
-    combined['rel_vol'] = combined['volume'] / (vol_ma + 1e-9)
-    
-    # Drop NaN rows from indicator warmup
-    combined = combined.dropna(subset=['sma200', 'roll_min', 'roll_max'])
-    
-    # Split by month
-    combined['month'] = pd.to_datetime(combined.index).month
-    train_df = combined[combined['month'].isin(train_months)].drop(columns=['month'])
-    test_df = combined[combined['month'].isin(test_months)].drop(columns=['month'])
-    
-    log(f"  TRAIN: {len(train_df):,} bars")
-    log(f"  TEST: {len(test_df):,} bars (UNSEEN)")
+    log(f"  TRAIN: {len(train_df):,} bars (after warmup)")
+    log(f"  TEST: {len(test_df):,} bars (after warmup)")
     
     return train_df, test_df, train_months, test_months
 
