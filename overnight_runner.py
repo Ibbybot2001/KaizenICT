@@ -1,4 +1,4 @@
-"""
+﻿"""
 OVERNIGHT RESEARCH RUNNER V1
 ============================
 Autonomous 6-7 hour strategy discovery pipeline.
@@ -177,7 +177,7 @@ class SessionGeneticMiner:
     def _prepare_data(self, df):
         """Convert DataFrame to GPU tensors."""
         # Filter to session hours
-        df = df.copy()
+        df = train_df.copy()
         df['hour'] = pd.to_datetime(df.index).hour
         df['minute'] = pd.to_datetime(df.index).minute
         
@@ -441,7 +441,7 @@ def run_overnight():
     for kz_name, kz_cfg in KILL_ZONES.items():
         try:
             SESSIONS[kz_name] = kz_cfg  # Temporarily add
-            miner = SessionGeneticMiner(df, kz_name, population_size=10000, generations=100)
+            miner = SessionGeneticMiner(train_df, kz_name, population_size=10000, generations=100)
             results = miner.run()
             all_results.extend(results)
             log(f"  {kz_name}: Found {len(results)} strategies")
@@ -459,7 +459,7 @@ def run_overnight():
     
     check_ram_and_throttle()
     
-    df_copy = df.copy()
+    df_copy = train_df.copy()
     df_copy['dayofweek'] = pd.to_datetime(df_copy.index).dayofweek
     
     for day_num, day_name in [(0, 'Monday'), (1, 'Tuesday'), (2, 'Wednesday'), 
@@ -488,7 +488,7 @@ def run_overnight():
     check_ram_and_throttle()
     
     # Calculate displacement (large body candles)
-    df_disp = df.copy()
+    df_disp = train_df.copy()
     df_disp['body'] = abs(df_disp['close'] - df_disp['open'])
     df_disp['body_pct'] = df_disp['body'] / df_disp['close'].rolling(20).mean() * 100
     
@@ -517,7 +517,7 @@ def run_overnight():
     
     check_ram_and_throttle()
     
-    df_pd = df.copy()
+    df_pd = train_df.copy()
     df_pd['date'] = pd.to_datetime(df_pd.index).date
     
     # Calculate previous day high/low
@@ -556,7 +556,7 @@ def run_overnight():
     
     check_ram_and_throttle()
     
-    df_vol = df.copy()
+    df_vol = train_df.copy()
     df_vol['range'] = df_vol['high'] - df_vol['low']
     df_vol['atr_20'] = df_vol['range'].rolling(20).mean()
     df_vol['vol_ratio'] = df_vol['range'] / df_vol['atr_20']
@@ -597,7 +597,7 @@ def run_overnight():
     
     check_ram_and_throttle()
     
-    df_mr = df.copy()
+    df_mr = train_df.copy()
     df_mr['sma_50'] = df_mr['close'].rolling(50).mean()
     df_mr['distance'] = (df_mr['close'] - df_mr['sma_50']) / df_mr['sma_50'] * 100
     
@@ -647,7 +647,7 @@ def run_overnight():
     for ib_name, ib_cfg in IB_WINDOWS:
         try:
             SESSIONS[ib_name] = ib_cfg
-            miner = SessionGeneticMiner(df, ib_name, population_size=10000, generations=120)
+            miner = SessionGeneticMiner(train_df, ib_name, population_size=10000, generations=120)
             results = miner.run()
             for r in results:
                 r['ib_type'] = ib_name
@@ -667,7 +667,7 @@ def run_overnight():
     
     check_ram_and_throttle()
     
-    df_candle = df.copy()
+    df_candle = train_df.copy()
     df_candle['body'] = abs(df_candle['close'] - df_candle['open'])
     df_candle['upper_wick'] = df_candle['high'] - df_candle[['open', 'close']].max(axis=1)
     df_candle['lower_wick'] = df_candle[['open', 'close']].min(axis=1) - df_candle['low']
@@ -815,7 +815,7 @@ def run_overnight():
     elapsed = (time.time() - overall_start) / 60
     log(f"\n⏱️ Total Runtime: {elapsed:.1f} minutes")
     log(f"📊 Total Strategies Found: {len(all_results)}")
-    log(f"✅ Validated on Unseen Data: {len(validated_results)}")
+    log(f"�?Validated on Unseen Data: {len(validated_results)}")
     log(f"📅 Train Months: {train_months}")
     log(f"📅 Test Months: {test_months}")
     log("=" * 60)

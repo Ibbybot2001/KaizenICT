@@ -18,8 +18,12 @@ class DashboardLogger:
         self.sheet_1min = None
         self.sheet_trades = None
         
-        # NaN Safety Helper
-        self.sf = lambda v, default=0.0: default if pd.isna(v) or np.isinf(v) else v
+        # NaN Safety Helper + Native Type Conversion (Prevents JSON serialization errors at midnight)
+        def sf(v, default=0.0):
+            if pd.isna(v) or np.isinf(v): return default
+            if hasattr(v, 'item'): return v.item() # Convert numpy types to native
+            return v
+        self.sf = sf
         
         # Performance Tracking
         self.req_count = 0

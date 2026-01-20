@@ -446,15 +446,21 @@ class GoldenBot:
             df['minute'] = df['ny_time'].dt.minute
             df['date_only'] = df['ny_time'].dt.date
             
-            # 1. IB Levels (09:30 - 10:00 Today)
-            today = df['date_only'].iloc[-1]
-            ib_mask = (df['date_only'] == today) & (
+            # 1. IB Levels (Most recent 09:30 - 10:00 window)
+            ib_mask = (
                 ((df['hour'] == 9) & (df['minute'] >= 30)) | ((df['hour'] == 10) & (df['minute'] == 0))
             )
             ib_bars = df[ib_mask]
             
-            df['IB_H'] = ib_bars['high'].max() if not ib_bars.empty else 0
-            df['IB_L'] = ib_bars['low'].min() if not ib_bars.empty else 0
+            # Use the most recent day's IB if we have multiple days
+            if not ib_bars.empty:
+                last_ib_date = ib_bars['date_only'].iloc[-1]
+                latest_ib_bars = ib_bars[ib_bars['date_only'] == last_ib_date]
+                df['IB_H'] = latest_ib_bars['high'].max()
+                df['IB_L'] = latest_ib_bars['low'].min()
+            else:
+                df['IB_H'] = 0
+                df['IB_L'] = 0
             
             # 2. ASIA Levels (18:00 Prev - 00:00 Today)
             # Simplistic: Just look at 18-00 in the last 24h window
@@ -650,7 +656,7 @@ class GoldenBot:
             
         # 6. Signature Guard (Mechanical suppression of redundant signals)
         if final_action:
-            sig_ts = str(row['time'])
+            sig_ts = str(row['ny_time']) if 'ny_time' in row else str(row.name)
             signature = (sig_ts, final_strat, final_action)
             
             if signature in self.traded_signals:
@@ -671,7 +677,7 @@ class GoldenBot:
         }
 
         # Return Tuple (Action, Details, Strat_ID, Signal_TS)
-        return final_action, details, final_strat, str(row['time']) if final_action else None
+        return final_action, details, final_strat, str(row['ny_time']) if final_action and 'ny_time' in row else None
 
     def execute_trade(self, action, price, strategy_id="GOLDEN_DEFAULT", sig_ts=None):
         if DATA_ONLY_MODE:
