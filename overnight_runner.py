@@ -408,7 +408,7 @@ def run_overnight():
             # Check RAM before starting
             check_ram_and_throttle()
             
-            miner = SessionGeneticMiner(train_df, session, population_size=5000, generations=50)
+            miner = SessionGeneticMiner(train_df, session, population_size=15000, generations=150)
             results = miner.run()
             all_results.extend(results)
             log(f"  {session}: Found {len(results)} strategies")
@@ -441,7 +441,7 @@ def run_overnight():
     for kz_name, kz_cfg in KILL_ZONES.items():
         try:
             SESSIONS[kz_name] = kz_cfg  # Temporarily add
-            miner = SessionGeneticMiner(df, kz_name, population_size=3000, generations=30)
+            miner = SessionGeneticMiner(df, kz_name, population_size=10000, generations=100)
             results = miner.run()
             all_results.extend(results)
             log(f"  {kz_name}: Found {len(results)} strategies")
@@ -469,7 +469,7 @@ def run_overnight():
             log(f"  Testing {day_name}: {len(day_df):,} bars")
             
             # Use IB session as base
-            miner = SessionGeneticMiner(day_df, 'ib', population_size=2000, generations=25)
+            miner = SessionGeneticMiner(day_df, 'ib', population_size=8000, generations=80)
             results = miner.run()
             for r in results:
                 r['day'] = day_name  # Tag with day
@@ -499,7 +499,7 @@ def run_overnight():
             log(f"  Displacement >{disp_threshold*100:.0f}%: {len(disp_df):,} bars")
             
             if len(disp_df) > 1000:
-                miner = SessionGeneticMiner(disp_df, 'us_open', population_size=2000, generations=25)
+                miner = SessionGeneticMiner(disp_df, 'us_open', population_size=8000, generations=80)
                 results = miner.run()
                 for r in results:
                     r['filter'] = f'displacement>{disp_threshold}'
@@ -538,7 +538,7 @@ def run_overnight():
             log(f"  {sweep_type}: {len(sweep_df):,} bars")
             
             if len(sweep_df) > 500:
-                miner = SessionGeneticMiner(sweep_df, 'us_open', population_size=2000, generations=25)
+                miner = SessionGeneticMiner(sweep_df, 'us_open', population_size=8000, generations=80)
                 results = miner.run()
                 for r in results:
                     r['filter'] = sweep_type
@@ -566,7 +566,7 @@ def run_overnight():
     log(f"  High Volatility Regime: {len(high_vol_df):,} bars")
     
     try:
-        miner = SessionGeneticMiner(high_vol_df, 'us_open', population_size=3000, generations=30)
+        miner = SessionGeneticMiner(high_vol_df, 'us_open', population_size=10000, generations=100)
         results = miner.run()
         for r in results:
             r['regime'] = 'high_volatility'
@@ -579,7 +579,7 @@ def run_overnight():
     log(f"  Low Volatility Regime: {len(low_vol_df):,} bars")
     
     try:
-        miner = SessionGeneticMiner(low_vol_df, 'us_open', population_size=3000, generations=30)
+        miner = SessionGeneticMiner(low_vol_df, 'us_open', population_size=10000, generations=100)
         results = miner.run()
         for r in results:
             r['regime'] = 'low_volatility'
@@ -606,7 +606,7 @@ def run_overnight():
     log(f"  Extended from Mean: {len(extended_df):,} bars")
     
     try:
-        miner = SessionGeneticMiner(extended_df, 'us_open', population_size=3000, generations=30)
+        miner = SessionGeneticMiner(extended_df, 'us_open', population_size=10000, generations=100)
         results = miner.run()
         for r in results:
             r['strategy_type'] = 'mean_reversion'
@@ -619,7 +619,7 @@ def run_overnight():
     log(f"  Close to Mean: {len(close_to_mean_df):,} bars")
     
     try:
-        miner = SessionGeneticMiner(close_to_mean_df, 'us_open', population_size=3000, generations=30)
+        miner = SessionGeneticMiner(close_to_mean_df, 'us_open', population_size=10000, generations=100)
         results = miner.run()
         for r in results:
             r['strategy_type'] = 'trend_breakout'
@@ -647,7 +647,7 @@ def run_overnight():
     for ib_name, ib_cfg in IB_WINDOWS:
         try:
             SESSIONS[ib_name] = ib_cfg
-            miner = SessionGeneticMiner(df, ib_name, population_size=3000, generations=40)
+            miner = SessionGeneticMiner(df, ib_name, population_size=10000, generations=120)
             results = miner.run()
             for r in results:
                 r['ib_type'] = ib_name
@@ -679,7 +679,7 @@ def run_overnight():
     log(f"  Pin Bars: {len(pin_bars):,} bars")
     
     try:
-        miner = SessionGeneticMiner(pin_bars, 'us_open', population_size=2000, generations=25)
+        miner = SessionGeneticMiner(pin_bars, 'us_open', population_size=8000, generations=80)
         results = miner.run()
         for r in results:
             r['pattern'] = 'pin_bar'
@@ -693,7 +693,7 @@ def run_overnight():
     log(f"  Engulfing Candles: {len(engulfing):,} bars")
     
     try:
-        miner = SessionGeneticMiner(engulfing, 'us_open', population_size=2000, generations=25)
+        miner = SessionGeneticMiner(engulfing, 'us_open', population_size=8000, generations=80)
         results = miner.run()
         for r in results:
             r['pattern'] = 'engulfing'
