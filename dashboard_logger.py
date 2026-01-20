@@ -197,13 +197,14 @@ class DashboardLogger:
         try:
             # 1. Proactive Expansion: Ensure at least 50 spare rows
             current_rows = self.sheet_trades.row_count
-            # append_row can fail if it hits the absolute grid limit (max 10M cells or sheet limit)
-            # We explicitly add rows if the count is too high
             if current_rows >= 995:
-                # Expand by another 1000 rows
-                new_rows = current_rows + 1000
-                self.sheet_trades.add_rows(1000)
-                print(f"📈 Google Sheets: Expanded 'TradeLog' to {new_rows} rows.")
+                try:
+                    # Expand by another 1000 rows
+                    new_rows = current_rows + 1000
+                    self.sheet_trades.add_rows(1000)
+                    print(f"📈 Google Sheets: Expanded 'TradeLog' to {new_rows} rows.")
+                except Exception as e:
+                    print(f"⚠️ Sheet Expansion Failed (Ignorable): {e}")
             
             ts_str = self.get_ny_time_str()
             

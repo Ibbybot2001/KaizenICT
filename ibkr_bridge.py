@@ -9,6 +9,7 @@ import os
 from dashboard_logger import DashboardLogger
 from live.execution_bridge import TradersPostBroker
 from live.pool_fsm import TradeDirection # Needed for bridge compatibility
+from strategies.mle.strategy_loader import get_strategy_config # Dynamic Loader
 
 # Patch asyncio to allow nested event loops (fixes Jupyter/Windows issues)
 util.patchAsyncio()
@@ -22,7 +23,8 @@ CURRENCY = 'USD'
 CONTRACT_MONTH = '202603' # Correct Front Month for 2026 
 
 # SAFETY LOCK
-DATA_ONLY_MODE = False 
+DATA_ONLY_MODE = False
+TRUST_SIGNALS_MODE = True # User uses TradersPost; Local IBKR API may not see the trade. Trust Logic. 
 
 # Risk
 SL_POINTS = 5       # Sniper Precision (BH Closed)
@@ -144,11 +146,28 @@ class GoldenBot:
 
         # INITIAL AUDIT: Check if we are starting with a position
         try:
-            positions = self.ib.positions()
+            print(f"🔒 ACCOUNTS VISIBLE: {self.ib.managedAccounts()}")
+            print("🔍 STARTUP SCAN: Forcing Position Audit...")
+            self.ib.reqPositions() # Force refresh
+            await asyncio.sleep(2) # Allow sync
+            
+            # Retry loop to catch slow API sync
+            for i in range(3):
+                positions = self.ib.positions()
+                print(f"[DEBUG] Startup Scan {i+1}/3: Raw Positions: {positions}")
+                if positions: break
+                await asyncio.sleep(1)
+
             for p in positions:
                 if p.contract.symbol == SYMBOL or p.contract.localSymbol.startswith(SYMBOL):
                     if p.position != 0:
                         self.in_position = True
+                        self.current_trade = {
+                            "strat": "RECOVERED",
+                            "direction": "BUY" if p.position > 0 else "SELL",
+                            "entry": p.avgCost,
+                            "sl": 0, "tp": 0, "gs_row": 0
+                        }
                         print(f"🛡️ GUARDIAN: Internalized ACTIVE POSITION {p.position} contract(s) on startup.")
         except Exception as e:
             print(f"Audit Error: {e}")
@@ -279,13 +298,20 @@ class GoldenBot:
                 if found:
                     self.empty_pos_count = 0
                     self.in_position = True
+                if TRUST_SIGNALS_MODE:
+                     # In Signal Trust Mode, we DO NOT use API feedback to close trades.
+                     # We only close on Price Check (SL/TP) or internal logic.
+                     pass 
                 else:
                     self.empty_pos_count += 1
+                    if self.in_position:
+                         # print(f"[DEBUG] Drift {self.empty_pos_count}/30...")
+                         pass
                     
-                # Only process EXIT if we were in a position AND we have 5 consecutive empty polls
-                # (10 seconds of persistent FLAT status)
+                # Only process EXIT if we were in a position AND we have 30 consecutive empty polls
+                # (60 seconds of persistent FLAT status)
                 # AND we are past the 30s settlement window
-                if self.in_position and not found and self.empty_pos_count >= 5:
+                if self.in_position and not found and self.empty_pos_count >= 30:
                     if time.time() - self.last_trade_time < 30:
                         # Still in the "Fog of War" after entry - FORCE LOCK
                         pass 
@@ -440,6 +466,11 @@ class GoldenBot:
     def engineer_live_features(self, df):
         """Calculates IB and ASIA levels + FVG for the active session."""
         try:
+            # OPTIMIZATION: Slice to last ~5.5 days (8000 mins) to capture WEEKLY LEVELS while getting speed
+            # 1 Week = ~7000 trading minutes (24/5). 8000 is a safe buffer.
+            if len(df) > 8000:
+                df = df.iloc[-8000:].copy()
+            
             # Ensure NY Time
             df['ny_time'] = df['date'].dt.tz_convert('America/New_York')
             df['hour'] = df['ny_time'].dt.hour
@@ -533,12 +564,13 @@ class GoldenBot:
     def check_signals(self, df):
         # 0. Double-Wall Position Guard
         # Blocks if IBKR sees a position OR if bot is still processing an internal trade state
+        # Blocks if IBKR sees a position OR if bot is still processing an internal trade state
         if self.in_position or self.current_trade:
-            return None, "Position/Internal State Active", None
+            return None, "Position/Internal State Active", None, None
 
         # 1. Engineer Features
         df = self.engineer_live_features(df)
-        if df.empty or len(df) < 5: return None, "Insufficient Data", None
+        if df.empty or len(df) < 5: return None, "Insufficient Data", None, None
         row = df.iloc[-1]
         
         # 3. Time Filter (REMOVED for 24/7 Pivot)
@@ -566,7 +598,7 @@ class GoldenBot:
             self.swept_asia_high = False
             
         if self.daily_trade_count >= MAX_DAILY_TRADES:
-            return None, f"Max Trades Reached ({self.daily_trade_count}/{MAX_DAILY_TRADES})", None
+            return None, f"Max Trades Reached ({self.daily_trade_count}/{MAX_DAILY_TRADES})", None, None
 
             
         # 4. Strategy Evaluation
@@ -646,11 +678,11 @@ class GoldenBot:
             signature = (sig_ts, final_strat, final_action)
             
             if signature in self.traded_signals:
-                return None, f"Signal Already Executed ({sig_ts})", None
+                return None, f"Signal Already Executed ({sig_ts})", None, None
             
             # 7. Settlement Cooldown (Quick 30s buffer for order flight)
             if (time.time() - self.last_trade_time) < 30:
-                return None, "Settlement Cooldown (Order in Flight)", None
+                return None, "Settlement Cooldown (Order in Flight)", None, None
 
         details = f"IB={row['IB_H']:.1f}/{row['IB_L']:.1f}, ASIA={row['ASIA_H']:.1f}/{row['ASIA_L']:.1f}"
         
@@ -676,9 +708,12 @@ class GoldenBot:
         # IB: TP 80, SL 5
         # ASIA: TP 85, SL 5
         
-        # CONFIG MAP (Robust Pivot)
-        param_tp = TP_POINTS
-        param_sl = SL_POINTS
+        # CONFIG MAP (Robust Pivot) -- DYNAMIC LOAD
+        config = get_strategy_config(strategy_id)
+        param_tp = config.get('tp', TP_POINTS)
+        param_sl = config.get('sl', SL_POINTS)
+        
+        print(f"   ► Dynamic Config: SL={param_sl}, TP={param_tp}")
         
         # Calculate SL/TP
         if action == "BUY":
