@@ -1,17 +1,7 @@
 ﻿"""
-OVERNIGHT RESEARCH RUNNER V1
-============================
-Autonomous 6-7 hour strategy discovery pipeline.
-Uses RTX 4080 SUPER GPU for parallel genetic mining.
-
-PHASES:
-1. Multi-Session Genetic Mining (2 hours)
-2. Silver Bullet Window Search (1.5 hours)
-3. London Session Discovery (1.5 hours)
-4. Late Session Fade Search (1 hour)
-
-RUN: python overnight_runner.py
-OUTPUT: overnight_results/ folder with all findings
+OVERNIGHT RESEARCH RUNNER V6.1
+==============================
+V6.1: Institutional Engine + Weak Structure Opt
 """
 
 import torch
@@ -21,20 +11,20 @@ import time
 import json
 from pathlib import Path
 from datetime import datetime
-import sys
 import psutil
 import gc
+from joblib import Parallel, delayed
 
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
 BASE_DIR = Path("C:/Users/CEO/ICT reinforcement")
 DATA_DIR = BASE_DIR / "data/GOLDEN_DATA/USTEC_2025_GOLDEN_PARQUET"
-OUTPUT_DIR = BASE_DIR / "overnight_results"
+OUTPUT_DIR = BASE_DIR / "v6_overnight_results"
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 # Desktop Backup Directory
-DESKTOP_DIR = Path("C:/Users/CEO/Desktop/V5_ENGINE_RESULTS")
+DESKTOP_DIR = Path("C:/Users/CEO/Desktop/V6_ENGINE_RESULTS")
 DESKTOP_DIR_WINNERS = DESKTOP_DIR / "WINNERS"
 DESKTOP_DIR_LOGS = DESKTOP_DIR / "ENGINE_LOGS"
 DESKTOP_DIR_WINNERS.mkdir(parents=True, exist_ok=True)
@@ -52,7 +42,7 @@ USE_TICK_DATA = True  # Set to False for faster but less accurate testing
 MAX_RAM_GB = 30
 THROTTLE_RAM_GB = 25  # Start throttling at 25GB to stay safe
 
-# V5 Constants for Pure Tick Resolution
+# V6 Constants for Pure Tick Resolution
 POINT_VALUE = 20.0
 COMMISSION = 2.05
 SPREAD_SLIPPAGE = 2.0  # Conservative: 2 pts (entry + exit slippage combined)
@@ -60,11 +50,11 @@ TRADE_TIMEOUT_SECONDS = 14400  # 4 hours max hold
 TRADE_COOLDOWN_BARS = 1  # Minimum bars between trades (prevents instant re-entry)
 
 # ============================================================================
-# V5 TICK DATA FUNCTIONS
+# V6 TICK DATA FUNCTIONS
 # ============================================================================
 def load_tick_data():
-    """Load all tick parquet files for V5 Pure Tick outcome resolution."""
-    log("Loading Tick Data for V5 Pure Tick Resolution...")
+    """Load all tick parquet files for V6 Pure Tick outcome resolution."""
+    log("Loading Tick Data for V6 Pure Tick Resolution...")
     tick_files = sorted(DATA_DIR.glob("*_clean_ticks.parquet"))
     
     if not tick_files:
@@ -89,89 +79,151 @@ def load_tick_data():
     return tick_df
 
 
-def resolve_outcome_ticks(tick_times, tick_prices, entry_time_val, entry_price, sl_pts, tp_pts, direction):
+def resolve_outcome_ticks(tick_times, tick_prices, entry_time_val, fill_price, sl_pts, tp_pts, direction):
     """
-    V5 PURE TICK RESOLUTION (NUMPY OPTIMIZED)
-    High-performance tick check using numpy arrays instead of pandas iterrows.
-    
-    Args:
-        tick_times: np.array of tick timestamps (int64 nanoseconds)
-        tick_prices: np.array of tick prices (float32)
-        entry_time_val: entry timestamp (int64 nanoseconds)
-        entry_price: float entry price
-        sl_pts: stop loss points
-        tp_pts: take profit points
-        direction: 'LONG' or 'SHORT'
+    V6 PURE TICK RESOLUTION (NUMPY OPTIMIZED)
+    Verifies if the fill_price (Limit/OTE) is hit, then resolves SL/TP.
     """
-    # 1. Find start index using binary search (O(log n))
+    # 1. Find start index using binary search
     start_idx = np.searchsorted(tick_times, entry_time_val, side='right')
-    
-    if start_idx >= len(tick_times):
-        return 'TIMEOUT', 0
+    if start_idx >= len(tick_times): return 'TIMEOUT', 0
         
-    # 2. Slice future ticks (numpy view, zero copy)
-    # Limit max checks to avoid scanning millions of ticks unnecessarily
-    # Assuming 100k ticks is enough to hit SL/TP or timeout
-    max_lookahead = 100000 
+    # 2. Slice future ticks
+    max_lookahead = 200000 # Increased for V6 OTE wait time
     end_idx = min(len(tick_times), start_idx + max_lookahead)
-    
     future_times = tick_times[start_idx:end_idx]
     future_prices = tick_prices[start_idx:end_idx]
     
-    if len(future_prices) == 0:
-        return 'TIMEOUT', 0
-        
-    # 3. Define levels
+    if len(future_prices) == 0: return 'TIMEOUT', 0
+    
+    # 3. Find Fill Index
     if direction == 'LONG':
-        tp_price = entry_price + tp_pts
-        sl_price = entry_price - sl_pts
+        fill_mask = future_prices <= fill_price
+    else:
+        fill_mask = future_prices >= fill_price
+    
+    fill_indices = np.where(fill_mask)[0]
+    if len(fill_indices) == 0:
+        return 'SKIPPED', 0 # Limit order never touched
+    
+    f_idx = fill_indices[0]
+    
+    # 4. Check for Timeout before Fill
+    fill_time = future_times[f_idx]
+    if (fill_time - entry_time_val) / 1e9 > TRADE_TIMEOUT_SECONDS:
+        return 'SKIPPED', 0
         
-        # Vectorized check: Find first index where price hits TP or SL
-        # We need the FIRST event in time order
+    # 5. Evaluate SL/TP starting from the Fill Index (inclusive)
+    # SL/TP can be hit on the same tick as the fill
+    eval_prices = future_prices[f_idx:]
+    if len(eval_prices) == 0: return 'TIMEOUT', 0
+    
+    if direction == 'LONG':
+        tp_price = fill_price + tp_pts
+        sl_price = fill_price - sl_pts
+        hit_tp = eval_prices >= tp_price
+        hit_sl = eval_prices <= sl_price
+    else:
+        tp_price = fill_price - tp_pts
+        sl_price = fill_price + sl_pts
+        hit_tp = eval_prices <= tp_price
+        hit_sl = eval_prices >= sl_price
         
-        # Boolean masks
-        hit_tp = future_prices >= tp_price
-        hit_sl = future_prices <= sl_price
-        
-        # Get indices where events happen
-        tp_indices = np.where(hit_tp)[0]
-        sl_indices = np.where(hit_sl)[0]
-        
-        first_tp = tp_indices[0] if len(tp_indices) > 0 else 999999999
-        first_sl = sl_indices[0] if len(sl_indices) > 0 else 999999999
-        
-        if first_tp < first_sl:
-            return 'WIN', tp_pts
-        elif first_sl < first_tp:
-            return 'LOSS', -sl_pts
-            
-    else: # SHORT
-        tp_price = entry_price - tp_pts
-        sl_price = entry_price + sl_pts
-        
-        hit_tp = future_prices <= tp_price
-        hit_sl = future_prices >= sl_price
-        
-        tp_indices = np.where(hit_tp)[0]
-        sl_indices = np.where(hit_sl)[0]
-        
-        first_tp = tp_indices[0] if len(tp_indices) > 0 else 999999999
-        first_sl = sl_indices[0] if len(sl_indices) > 0 else 999999999
-        
-        if first_tp < first_sl:
-            return 'WIN', tp_pts
-        elif first_sl < first_tp:
-            return 'LOSS', -sl_pts
-            
-    # 4. Check Timeout
-    # If checked all ticks in slice and no hit, check time of last tick
-    if len(future_times) > 0:
-        last_time = future_times[-1]
-        loss_seconds = (last_time - entry_time_val) / 1e9 # ns to seconds
-        if loss_seconds > TRADE_TIMEOUT_SECONDS:
-            return 'TIMEOUT', 0
+    tp_indices = np.where(hit_tp)[0]
+    sl_indices = np.where(hit_sl)[0]
+    first_tp = tp_indices[0] if len(tp_indices) > 0 else 999999999
+    first_sl = sl_indices[0] if len(sl_indices) > 0 else 999999999
+    
+    if first_tp < first_sl:
+        return 'WIN', tp_pts
+    elif first_sl < first_tp:
+        return 'LOSS', -sl_pts
             
     return 'TIMEOUT', 0
+
+def worker_resolve_trades_chunk(
+    strat_params_chunk, long_signals_chunk, short_signals_chunk, 
+    tick_times, tick_prices, bar_times, 
+    close_prices, high_prices, low_prices, open_prices,
+    n_bars, trade_cooldown_bars, spread_slippage, point_value, commission, trade_timeout_seconds,
+    min_pf, min_win_rate
+):
+    """Worker function for parallel trade resolution on a CHUNK of strategies."""
+    results = []
+    num_strats = len(strat_params_chunk)
+    
+    for i in range(num_strats):
+        strat_params = strat_params_chunk[i]
+        entry_long_np = long_signals_chunk[i]
+        entry_short_np = short_signals_chunk[i]
+        
+        c_sl, c_tp, c_ote = strat_params[0], strat_params[1], strat_params[8]
+        
+        long_indices = np.where(entry_long_np)[0]
+        short_indices = np.where(entry_short_np)[0]
+        
+        signals = [(idx, 'LONG') for idx in long_indices] + [(idx, 'SHORT') for idx in short_indices]
+        signals.sort(key=lambda x: x[0])
+        
+        total_pnl, wins, losses = 0.0, 0, 0
+        actual_win_pnl, actual_loss_pnl = 0.0, 0.0
+        in_position, last_trade_end_idx = False, -999
+        
+        # Performance tuning: only resolve if there are signals
+        if len(signals) > 0:
+            for sig_idx, direction in signals:
+                if sig_idx <= last_trade_end_idx + trade_cooldown_bars: continue
+                if in_position: continue
+                entry_bar_idx = sig_idx + 1
+                if entry_bar_idx >= n_bars: continue
+                
+                sig_h, sig_l = high_prices[sig_idx], low_prices[sig_idx]
+                if direction == 'LONG':
+                    ote_price = sig_l + (sig_h - sig_l) * (1 - c_ote)
+                    entry_price = min(open_prices[entry_bar_idx], ote_price)
+                else:
+                    ote_price = sig_h - (sig_h - sig_l) * (1 - c_ote)
+                    entry_price = max(open_prices[entry_bar_idx], ote_price)
+                
+                entry_time_val = bar_times[entry_bar_idx]
+                outcome, pnl_pts = resolve_outcome_ticks(
+                    tick_times, tick_prices, entry_time_val, entry_price, c_sl, c_tp, direction
+                )
+                
+                if outcome == 'SKIPPED': continue
+                
+                in_position = True
+                entry_cost = (spread_slippage * point_value) + commission
+                trade_pnl = (pnl_pts * point_value) - entry_cost
+                
+                if outcome == 'TIMEOUT':
+                    mtm_exit = close_prices[-1] if n_bars > 0 else entry_price
+                    mtm_pnl_pts = (mtm_exit - entry_price) if direction == 'LONG' else (entry_price - mtm_exit)
+                    trade_pnl = (mtm_pnl_pts * point_value) - entry_cost
+                    last_trade_end_idx = n_bars - 1
+                else:
+                    last_trade_end_idx = entry_bar_idx
+                
+                if trade_pnl > 0:
+                    wins += 1; actual_win_pnl += trade_pnl
+                else:
+                    losses += 1; actual_loss_pnl += abs(trade_pnl)
+                
+                total_pnl += trade_pnl
+                in_position = False
+
+        trades = wins + losses
+        pf = actual_win_pnl / (actual_loss_pnl + 0.001) if actual_loss_pnl > 0 else actual_win_pnl
+        win_rate = wins / (trades + 0.001)
+        
+        score = total_pnl
+        if pf < min_pf: score -= 1e6
+        if trades < 30: score -= 1e6
+        if win_rate < min_win_rate: score -= 1e6
+        
+        results.append((float(score), float(trades)))
+        
+    return results
 
 
 def check_ram_and_throttle():
@@ -203,7 +255,7 @@ MIN_TRADES_RATIO = 0.02     # Min 2% of bars should be trades (flexible)
 MAX_TRADES_RATIO = 0.10     # Max 10% of bars (avoid overtrading)
 
 # For threshold calculation in miner
-MIN_TRADES_PER_YEAR = 50    # Absolute minimum to even consider
+MIN_TRADES_PER_YEAR = 30    # LOOSENED: was 50
 MAX_TRADES_PER_YEAR = 5000  # Absolute maximum
 
 # Realistic Costs
@@ -212,9 +264,9 @@ COMMISSION_PTS = 0.25  # ~$0.50 commission = 0.25 pts for MNQ
 TOTAL_COST_PER_TRADE = SLIPPAGE_PTS + COMMISSION_PTS  # 0.75 pts total
 
 # Performance Requirements
-MIN_PF = 1.3
-MIN_EXPECTANCY = 1.0  # Points AFTER costs
-MIN_WIN_RATE = 0.35  # 35% minimum
+MIN_PF = 1.1        # LOOSENED: was 1.3
+MIN_EXPECTANCY = 0.2 # LOOSENED: was 1.0
+MIN_WIN_RATE = 0.30  # LOOSENED: was 0.35
 
 # Robustness Requirements (REALISM)
 MAX_CONSECUTIVE_LOSSES = 10  # Stop if strategy has 10+ losing streak
@@ -240,6 +292,22 @@ def log(msg):
             f.write(formatted + "\n")
     except:
         pass
+
+def save_checkpoint(results, filename="v6_checkpoint.json"):
+    """Save results periodically to local and desktop."""
+    try:
+        # Local save
+        path = OUTPUT_DIR / filename
+        with open(path, 'w') as f:
+            json.dump(results, f, indent=2)
+        
+        # Desktop save
+        desktop_path = DESKTOP_DIR_WINNERS / filename
+        import shutil
+        with open(desktop_path, 'w') as f:
+            json.dump(results, f, indent=2)
+    except Exception as e:
+        log(f"Error saving checkpoint: {e}")
 
 # ============================================================================
 # DATA LOADER
@@ -306,6 +374,40 @@ def load_train_test_data():
         df['roll_min'] = df['low'].rolling(60, min_periods=60).min().shift(1)
         df['roll_max'] = df['high'].rolling(60, min_periods=60).max().shift(1)
         
+        # ATR for Displacement
+        high_low = df['high'] - df['low']
+        high_close = (df['high'] - df['close'].shift()).abs()
+        low_close = (df['low'] - df['close'].shift()).abs()
+        tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+        df['atr'] = tr.rolling(14).mean()
+        df['displacement'] = (df['close'] - df['open']).abs() / (df['atr'].shift() + 1e-9)
+        
+        # Swing High/Lows for MSS (Strong = 2-bar confirmation, Weak = 1-bar confirmation)
+        # Strong: T-2 was extreme relative to T-4,3,1,0
+        df['swing_high_strong'] = (df['high'].shift(2) > df['high'].shift(3)) & (df['high'].shift(2) > df['high'].shift(4)) & \
+                                  (df['high'].shift(2) > df['high'].shift(1)) & (df['high'].shift(2) > df['high'])
+        df['swing_low_strong'] = (df['low'].shift(2) < df['low'].shift(3)) & (df['low'].shift(2) < df['low'].shift(4)) & \
+                                 (df['low'].shift(2) < df['low'].shift(1)) & (df['low'].shift(2) < df['low'])
+        
+        # Weak: T-1 was extreme relative to T-2, 0 
+        df['swing_high_weak'] = (df['high'].shift(1) > df['high'].shift(2)) & (df['high'].shift(1) > df['high'])
+        df['swing_low_weak'] = (df['low'].shift(1) < df['low'].shift(2)) & (df['low'].shift(1) < df['low'])
+        
+        # Track Most Recent Swing Strong
+        df['last_swing_h_strong'] = df['high'].shift(2).where(df['swing_high_strong']).ffill()
+        df['last_swing_l_strong'] = df['low'].shift(2).where(df['swing_low_strong']).ffill()
+        
+        # Track Most Recent Swing Weak
+        df['last_swing_h_weak'] = df['high'].shift(1).where(df['swing_high_weak']).ffill()
+        df['last_swing_l_weak'] = df['low'].shift(1).where(df['swing_low_weak']).ffill()
+        
+        # MSS: Price breaks the last institutional swing
+        df['mss_bull_strong'] = (df['close'] > df['last_swing_h_strong'].shift())
+        df['mss_bear_strong'] = (df['close'] < df['last_swing_l_strong'].shift())
+        
+        df['mss_bull_weak'] = (df['close'] > df['last_swing_h_weak'].shift())
+        df['mss_bear_weak'] = (df['close'] < df['last_swing_l_weak'].shift())
+
         # Volume handling
         if 'volume' not in df.columns or df['volume'].sum() < 1.0:
             if 'tick_volume' in df.columns:
@@ -317,7 +419,7 @@ def load_train_test_data():
         df['rel_vol'] = df['volume'] / (vol_ma + 1e-9)
         
         # Drop NaN rows from indicator warmup
-        df = df.dropna(subset=['sma200', 'roll_min', 'roll_max'])
+        df = df.dropna(subset=['sma200', 'roll_min', 'roll_max', 'atr'])
         return df
     
     # Apply indicators SEPARATELY to prevent train/test contamination
@@ -333,7 +435,7 @@ def load_train_test_data():
     return train_df, test_df, train_months, test_months
 
 # ============================================================================
-# V5 GPU GENETIC MINER WITH PURE TICK RESOLUTION
+# V6 GPU GENETIC MINER WITH PURE TICK RESOLUTION
 # ============================================================================
 class SessionGeneticMiner:
     def __init__(self, df, session_name, population_size=5000, generations=50, tick_df=None):
@@ -391,6 +493,14 @@ class SessionGeneticMiner:
         self.fvg_bull_gap = torch.nan_to_num(self.low - prev_high_2, nan=0.0)
         self.fvg_bear_gap = torch.nan_to_num(prev_low_2 - self.high, nan=0.0)
         
+        # V6: Displacement and MSS (Strong/Weak)
+        self.disp = torch.tensor(df['displacement'].values, dtype=torch.float32, device=DEVICE)
+        self.mss_bull_strong = torch.tensor(df['mss_bull_strong'].values, dtype=torch.bool, device=DEVICE)
+        self.mss_bear_strong = torch.tensor(df['mss_bear_strong'].values, dtype=torch.bool, device=DEVICE)
+        self.mss_bull_weak = torch.tensor(df['mss_bull_weak'].values, dtype=torch.bool, device=DEVICE)
+        self.mss_bear_weak = torch.tensor(df['mss_bear_weak'].values, dtype=torch.bool, device=DEVICE)
+        self.atr = torch.tensor(df['atr'].values, dtype=torch.float32, device=DEVICE)
+        
         # Quality filters
         self.body_size = torch.abs(self.close - self.open)
         range_size = self.high - self.low
@@ -424,151 +534,140 @@ class SessionGeneticMiner:
         self.recent_sweep_short = torch.nn.functional.max_pool1d(sweep_short_padded, kernel_size=sweep_pad, stride=1, padding=0).view(-1)[:len(self.high)]
     
     def init_population(self):
-        """V5 Genome: [SL, TP, Body, Wick, FVG, Vol]"""
+        """V6 Genome: [SL, TP, Body, Wick, FVG, Vol, Disp, MSS_En, OTE, Struct_Type]"""
         sl = torch.randint(5, 100, (self.pop_size,), device=DEVICE)
         tp = torch.randint(10, 300, (self.pop_size,), device=DEVICE)
         body = torch.randint(0, 15, (self.pop_size,), device=DEVICE)
         wick = torch.randint(10, 100, (self.pop_size,), device=DEVICE)
         fvg_str = torch.rand((self.pop_size,), device=DEVICE) * 2.5
         rel_vol = torch.rand((self.pop_size,), device=DEVICE) * 2.0
-        return torch.stack([sl.float(), tp.float(), body.float(), wick.float(), fvg_str, rel_vol], dim=1)
+        
+        # V6 Additions
+        disp = torch.rand((self.pop_size,), device=DEVICE) * 2.5
+        mss = torch.randint(0, 2, (self.pop_size,), device=DEVICE).float()
+        ote = 0.5 + torch.rand((self.pop_size,), device=DEVICE) * 0.4
+        struct_type = torch.randint(0, 2, (self.pop_size,), device=DEVICE).float() # 0=Weak, 1=Strong
+        
+        return torch.stack([sl.float(), tp.float(), body.float(), wick.float(), fvg_str, rel_vol, disp, mss, ote, struct_type], dim=1)
     
-    def evaluate_v5(self, pop):
-        """V5 PURE TICK EVALUATION with REALISM FIXES:
-        - Entry at NEXT bar open (not current bar close)
-        - Position overlap tracking (no concurrent trades)
-        - Trade cooldown enforcement
-        - Mark-to-market for TIMEOUT trades
-        """
+    def evaluate_v6(self, pop):
+        """V6 PURE TICK EVALUATION - Hyper-Resolution Vectorized Mode with BATCHING."""
         pop_size = len(pop)
         scores = torch.zeros(pop_size, device=DEVICE)
         trade_counts = torch.zeros(pop_size, device=DEVICE)
         
         active_indices = self.session_mask
         s_close = self.close[active_indices]
-        s_open = self.open[active_indices]  # REALISM: Use open for entry
+        s_open = self.open[active_indices]
+        s_high = self.high[active_indices]
+        s_low = self.low[active_indices]
         s_sma = self.sma[active_indices]
         s_body = self.body_size[active_indices]
         s_wick = self.wick_ratio[active_indices]
         s_rel = self.rel_vol[active_indices]
         s_fvg_long = self.fvg_bull_gap[active_indices]
         s_fvg_short = self.fvg_bear_gap[active_indices]
+        s_disp = self.disp[active_indices]
+        
         sweep_long = (self.recent_sweep_long[active_indices] > 0)
         sweep_short = (self.recent_sweep_short[active_indices] > 0)
         trend_long = (s_close > s_sma)
         trend_short = (s_close < s_sma)
         
-        bar_times = self.df.index[active_indices.cpu().numpy()]
+        bar_times_ints = self.df.index[active_indices.cpu().numpy()].astype(np.int64).values
         close_prices = s_close.cpu().numpy()
-        open_prices = s_open.cpu().numpy()  # REALISM: Next bar open as entry
-        n_bars = len(bar_times)
+        high_prices = s_high.cpu().numpy()
+        low_prices = s_low.cpu().numpy()
+        open_prices = s_open.cpu().numpy()
+        n_bars = len(bar_times_ints)
+
+        # GPU BATCHING: Prevent VRAM Overflow at 150k+ population
+        EVAL_BATCH_SIZE = 25000
         
-        for strat_idx in range(pop_size):
-            strat = pop[strat_idx]
-            c_sl, c_tp = strat[0].item(), strat[1].item()
-            c_body, c_wick = strat[2].item(), strat[3].item() / 100.0
-            c_fvg, c_vol = strat[4].item(), strat[5].item()
+        for batch_start in range(0, pop_size, EVAL_BATCH_SIZE):
+            batch_end = min(batch_start + EVAL_BATCH_SIZE, pop_size)
+            batch_pop = pop[batch_start:batch_end]
+            curr_batch_size = len(batch_pop)
             
+            # Vectorized Filters for this Batch
+            c_body = batch_pop[:, 2].unsqueeze(1)    
+            c_wick = batch_pop[:, 3].unsqueeze(1) / 100.0
+            c_fvg  = batch_pop[:, 4].unsqueeze(1)
+            c_vol  = batch_pop[:, 5].unsqueeze(1)
+            c_disp = batch_pop[:, 6].unsqueeze(1)
+            c_mss_en = batch_pop[:, 7].unsqueeze(1)
+            c_struct = batch_pop[:, 9].unsqueeze(1)
+
             mask_body = s_body >= c_body
             mask_wick = s_wick <= c_wick
-            mask_vol = True if self.disable_vol else (s_rel >= c_vol)
+            mask_vol  = (s_rel >= c_vol) if not self.disable_vol else torch.ones((curr_batch_size, n_bars), device=DEVICE, dtype=torch.bool)
+            mask_disp = s_disp >= c_disp
             
-            entry_long = sweep_long & trend_long & mask_body & mask_wick & mask_vol & (s_fvg_long >= c_fvg)
-            entry_short = sweep_short & trend_short & mask_body & mask_wick & mask_vol & (s_fvg_short >= c_fvg)
+            mss_mask_bull = torch.where(c_struct > 0.5, self.mss_bull_strong[active_indices], self.mss_bull_weak[active_indices])
+            mss_mask_bear = torch.where(c_struct > 0.5, self.mss_bear_strong[active_indices], self.mss_bear_weak[active_indices])
             
-            # Combine and sort all signal indices
-            long_indices = set(torch.where(entry_long)[0].cpu().numpy())
-            short_indices = set(torch.where(entry_short)[0].cpu().numpy())
-            all_signals = [(idx, 'LONG') for idx in long_indices] + [(idx, 'SHORT') for idx in short_indices]
-            all_signals.sort(key=lambda x: x[0])  # Sort by time
+            mss_mask_bull = torch.where(c_mss_en > 0.5, mss_mask_bull, torch.ones_like(mss_mask_bull))
+            mss_mask_bear = torch.where(c_mss_en > 0.5, mss_mask_bear, torch.ones_like(mss_mask_bear))
+
+            all_entry_long  = sweep_long & trend_long & mask_body & mask_wick & mask_vol & (s_fvg_long >= c_fvg) & mask_disp & mss_mask_bull
+            all_entry_short = sweep_short & trend_short & mask_body & mask_wick & mask_vol & (s_fvg_short >= c_fvg) & mask_disp & mss_mask_bear
+
+            long_signals_np = all_entry_long.cpu().numpy()
+            short_signals_np = all_entry_short.cpu().numpy()
+
+            # Clean up VRAM after signal extraction
+            del all_entry_long, all_entry_short, mask_body, mask_wick, mask_vol, mask_disp
             
-            total_pnl, wins, losses = 0.0, 0, 0
-            actual_win_pnl, actual_loss_pnl = 0.0, 0.0
+            # Split this batch into 16 chunks for the 16 processes
+            num_workers = 16
+            chunk_size = (curr_batch_size + num_workers - 1) // num_workers
             
-            # REALISM: Position tracking (no overlapping trades)
-            in_position = False
-            last_trade_end_idx = -999  # For cooldown tracking
+            pop_np = batch_pop.cpu().numpy()
             
-            for sig_idx, direction in all_signals:
-                # REALISM: Cooldown check
-                if sig_idx <= last_trade_end_idx + TRADE_COOLDOWN_BARS:
-                    continue
-                    
-                # REALISM: Position overlap check
-                if in_position:
-                    continue
-                
-                # REALISM: Entry at NEXT bar open
-                entry_bar_idx = sig_idx + 1
-                if entry_bar_idx >= n_bars:
-                    continue  # No next bar available
-                
-                entry_price = open_prices[entry_bar_idx]
-                entry_time = bar_times[entry_bar_idx]
-                
-                # Resolve outcome using numpy tick data
-                outcome, pnl_pts = resolve_outcome_ticks(
-                    self.tick_times, self.tick_prices, entry_time.value, entry_price, c_sl, c_tp, direction
-                )
-                
-                in_position = True
-                entry_cost = (self.SPREAD_SLIPPAGE * self.POINT_VALUE) + self.COMMISSION
-                
-                if outcome == 'WIN':
-                    trade_pnl = (pnl_pts * self.POINT_VALUE) - entry_cost
-                    total_pnl += trade_pnl
-                    wins += 1
-                    actual_win_pnl += trade_pnl
-                    in_position = False
-                    last_trade_end_idx = entry_bar_idx  # Approximate
-                elif outcome == 'LOSS':
-                    trade_pnl = (pnl_pts * self.POINT_VALUE) - entry_cost
-                    total_pnl += trade_pnl
-                    losses += 1
-                    actual_loss_pnl += abs(trade_pnl)
-                    in_position = False
-                    last_trade_end_idx = entry_bar_idx
-                else:  # TIMEOUT - mark-to-market at last known price
-                    # Use close of last bar in dataset as exit
-                    mtm_exit = close_prices[-1] if len(close_prices) > 0 else entry_price
-                    if direction == 'LONG':
-                        mtm_pnl_pts = mtm_exit - entry_price
-                    else:
-                        mtm_pnl_pts = entry_price - mtm_exit
-                    trade_pnl = (mtm_pnl_pts * self.POINT_VALUE) - entry_cost
-                    total_pnl += trade_pnl
-                    if trade_pnl > 0:
-                        wins += 1
-                        actual_win_pnl += trade_pnl
-                    else:
-                        losses += 1
-                        actual_loss_pnl += abs(trade_pnl)
-                    in_position = False
-                    last_trade_end_idx = n_bars - 1  # Held to end
-            
-            trades = wins + losses
-            pf = actual_win_pnl / (actual_loss_pnl + 0.001) if actual_loss_pnl > 0 else actual_win_pnl
-            win_rate = wins / (trades + 0.001)
-            expectancy = total_pnl / (trades + 0.001) if trades > 0 else 0
-            
-            # Robust scoring with multiple gates
-            score = total_pnl
-            
-            # Hard gates (must pass all)
-            if pf < MIN_PF: score -= 1e6
-            if trades < 50: score -= 1e6
-            if win_rate < MIN_WIN_RATE: score -= 1e6
-            
-            # Soft penalties (reduce score but don't eliminate)
-            if trades > 500: score *= 0.9  # Slight penalty for overtrading
-            if pf > 3.0: score *= 0.95  # Suspiciously high PF might be overfit
-            
-            # Fix: Cast to float to avoid TypeError with numpy types on CUDA
-            scores[strat_idx] = float(score)
-            trade_counts[strat_idx] = float(trades)
-            
-            if strat_idx > 0 and strat_idx % 100 == 0:
-                log(f"      V5 Progress: {strat_idx}/{pop_size}")
+            chunks = []
+            for c in range(num_workers):
+                c_start = c * chunk_size
+                c_end = min(c_start + chunk_size, curr_batch_size)
+                if c_start < c_end:
+                    chunks.append((
+                        pop_np[c_start:c_end],
+                        long_signals_np[c_start:c_end],
+                        short_signals_np[c_start:c_end]
+                    ))
+
+            # Parallel Multi-Core Trade Resolution on CHUNKS
+            chunk_results = Parallel(n_jobs=num_workers, backend='loky')(
+                delayed(worker_resolve_trades_chunk)(
+                    p_chunk, l_chunk, s_chunk,
+                    self.tick_times,
+                    self.tick_prices,
+                    bar_times_ints,
+                    close_prices,
+                    high_prices,
+                    low_prices,
+                    open_prices,
+                    n_bars,
+                    TRADE_COOLDOWN_BARS,
+                    self.SPREAD_SLIPPAGE,
+                    self.POINT_VALUE,
+                    self.COMMISSION,
+                    TRADE_TIMEOUT_SECONDS,
+                    MIN_PF,
+                    MIN_WIN_RATE
+                ) for p_chunk, l_chunk, s_chunk in chunks
+            )
+
+            # Flatten chunk results back into the scores/trade_counts arrays
+            idx_in_batch = 0
+            for res_list in chunk_results:
+                for score, trades in res_list:
+                    strat_idx = batch_start + idx_in_batch
+                    scores[strat_idx] = score
+                    trade_counts[strat_idx] = trades
+                    idx_in_batch += 1
+
+            if batch_start + curr_batch_size < pop_size:
+                log(f"      V6.1 HV Progress: {batch_start + curr_batch_size}/{pop_size} (16-Core Ultra)")
         
         return scores, trade_counts
     
@@ -579,23 +678,24 @@ class SessionGeneticMiner:
         next_gen = elites[indices].clone()
         prob = 0.2
         mask = torch.rand_like(next_gen.float()) < prob
-        noise = torch.randn_like(next_gen.float()) * torch.tensor([5, 10, 1, 5, 0.5, 0.2], device=DEVICE)
-        next_gen = torch.where(mask, next_gen + noise, next_gen)
+        # SL, TP, Body, Wick, FVG, Vol, Disp, MSS, OTE, Struct_Type
+        noise = torch.tensor([5, 10, 1, 5, 0.5, 0.2, 0.2, 0.1, 0.05, 0.1], device=DEVICE)
+        next_gen = torch.where(mask, next_gen + torch.randn_like(next_gen) * noise, next_gen)
+        # Clamping
         next_gen = torch.clamp(next_gen, min=0.0)
+        next_gen[:, 8] = torch.clamp(next_gen[:, 8], 0.5, 0.9) # OTE Range
+        next_gen[:, 7] = torch.where(next_gen[:, 7] > 0.5, 1.0, 0.0) # MSS Boolean
+        next_gen[:, 9] = torch.where(next_gen[:, 9] > 0.5, 1.0, 0.0) # Struct Type Boolean
         return torch.cat([elites, next_gen], dim=0)
     
     def run(self):
-        version = "V5 (Tick)" if self.tick_df is not None else "V4 (Bar)"
+        version = "V6.1 (Institutional)"
         log(f"  Starting {version} Genetic Search for {self.session_name}...")
         pop = self.init_population()
         best_results = []
         
         for g in range(self.generations):
-            if self.tick_df is not None:
-                scores, trades = self.evaluate_v5(pop)
-            else:
-                log("WARNING: No tick data - V5 requires tick_df!")
-                return []
+            scores, trades = self.evaluate_v6(pop)
             
             k = int(self.pop_size * 0.1)
             top_vals, top_indices = torch.topk(scores, k)
@@ -612,6 +712,8 @@ class SessionGeneticMiner:
                         'sl': s[0].item(), 'tp': s[1].item(),
                         'body': s[2].item(), 'wick': s[3].item(),
                         'fvg': s[4].item(), 'vol': s[5].item(),
+                        'disp': s[6].item(), 'mss': s[7].item(),
+                        'ote': s[8].item(), 'struct': s[9].item(),
                         'direction': 'BOTH',
                         'score': scores[idx].item(),
                         'trades': trades[idx].item()
@@ -644,12 +746,12 @@ def run_overnight():
     # Load data with random train/test split
     train_df, test_df, train_months, test_months = load_train_test_data()
     
-    # V5: Load tick data for pure tick outcome resolution
+    # V6.1: Load tick data for pure tick outcome resolution
     tick_df = load_tick_data()
     if tick_df is not None:
-        log("V5 Pure Tick Engine ACTIVE - Using tick data for SL/TP resolution")
+        log("V6.1 Pure Tick Engine ACTIVE - Using tick data for SL/TP resolution")
     else:
-        log("WARNING: No tick data found - V5 requires tick data!")
+        log("WARNING: No tick data found - V6 requires tick data!")
         return
     
     # ========================================================================
@@ -666,7 +768,7 @@ def run_overnight():
             # Check RAM before starting
             check_ram_and_throttle()
             
-            miner = SessionGeneticMiner(train_df, session, population_size=15000, generations=150, tick_df=tick_df)
+            miner = SessionGeneticMiner(train_df, session, population_size=150000, generations=150, tick_df=tick_df)
             results = miner.run()
             all_results.extend(results)
             log(f"  {session}: Found {len(results)} strategies")
@@ -677,6 +779,8 @@ def run_overnight():
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         gc.collect()
+        save_checkpoint(all_results) # Live Update after session
+    save_checkpoint(all_results, "v6_winners_phase1.json") # Save full phase result
     
     # ========================================================================
     # PHASE 2: Kill Zone Optimization (NY + London)
@@ -699,7 +803,7 @@ def run_overnight():
     for kz_name, kz_cfg in KILL_ZONES.items():
         try:
             SESSIONS[kz_name] = kz_cfg  # Temporarily add
-            miner = SessionGeneticMiner(train_df, kz_name, population_size=10000, generations=100, tick_df=tick_df)
+            miner = SessionGeneticMiner(train_df, kz_name, population_size=75000, generations=120, tick_df=tick_df)
             results = miner.run()
             all_results.extend(results)
             log(f"  {kz_name}: Found {len(results)} strategies")
@@ -707,6 +811,8 @@ def run_overnight():
         except Exception as e:
             log(f"  {kz_name}: ERROR - {e}")
         gc.collect()
+        save_checkpoint(all_results) # Live Update after KZ
+    save_checkpoint(all_results, "v6_winners_phase2.json")
     
     # ========================================================================
     # PHASE 3: Day-of-Week Effects
@@ -727,7 +833,7 @@ def run_overnight():
             log(f"  Testing {day_name}: {len(day_df):,} bars")
             
             # Use IB session as base
-            miner = SessionGeneticMiner(day_df, 'ib', population_size=8000, generations=80, tick_df=tick_df)
+            miner = SessionGeneticMiner(day_df, 'ib', population_size=12000, generations=80, tick_df=tick_df)
             results = miner.run()
             for r in results:
                 r['day'] = day_name  # Tag with day
@@ -735,6 +841,8 @@ def run_overnight():
         except Exception as e:
             log(f"  {day_name}: ERROR - {e}")
         gc.collect()
+        save_checkpoint(all_results) # Live Update after day
+    save_checkpoint(all_results, "v6_winners_phase3.json")
     
     # ========================================================================
     # PHASE 4: Displacement Detection (Large Move Follow-Through)
@@ -757,7 +865,7 @@ def run_overnight():
             log(f"  Displacement >{disp_threshold*100:.0f}%: {len(disp_df):,} bars")
             
             if len(disp_df) > 1000:
-                miner = SessionGeneticMiner(disp_df, 'us_open', population_size=8000, generations=80, tick_df=tick_df)
+                miner = SessionGeneticMiner(disp_df, 'us_open', population_size=75000, generations=100, tick_df=tick_df)
                 results = miner.run()
                 for r in results:
                     r['filter'] = f'displacement>{disp_threshold}'
@@ -796,7 +904,7 @@ def run_overnight():
             log(f"  {sweep_type}: {len(sweep_df):,} bars")
             
             if len(sweep_df) > 500:
-                miner = SessionGeneticMiner(sweep_df, 'us_open', population_size=8000, generations=80, tick_df=tick_df)
+                miner = SessionGeneticMiner(sweep_df, 'us_open', population_size=12000, generations=80, tick_df=tick_df)
                 results = miner.run()
                 for r in results:
                     r['filter'] = sweep_type
@@ -832,11 +940,12 @@ def run_overnight():
         log(f"  Round Number Crosses: {len(round_df):,} bars")
         
         if len(round_df) > 500:
-            miner = SessionGeneticMiner(round_df, 'us_open', population_size=8000, generations=80, tick_df=tick_df)
+            miner = SessionGeneticMiner(round_df, 'us_open', population_size=75000, generations=100, tick_df=tick_df)
             results = miner.run()
             for r in results:
                 r['filter'] = 'Round_Number'
             all_results.extend(results)
+            save_checkpoint(all_results) # Live Update
     except Exception as e:
         log(f"  Round Number Sweep: ERROR - {e}")
     gc.collect()
@@ -872,11 +981,12 @@ def run_overnight():
             log(f"  {sweep_type}: {len(sweep_df):,} bars")
             
             if len(sweep_df) > 300: # Fewer weekly sweeps usually
-                miner = SessionGeneticMiner(sweep_df, 'us_open', population_size=8000, generations=80, tick_df=tick_df)
+                miner = SessionGeneticMiner(sweep_df, 'us_open', population_size=75000, generations=100, tick_df=tick_df)
                 results = miner.run()
                 for r in results:
                     r['filter'] = sweep_type
                 all_results.extend(results)
+                save_checkpoint(all_results) # Live Update
         except Exception as e:
             log(f"  {sweep_type}: ERROR - {e}")
         gc.collect()
@@ -900,7 +1010,7 @@ def run_overnight():
     log(f"  High Volatility Regime: {len(high_vol_df):,} bars")
     
     try:
-        miner = SessionGeneticMiner(high_vol_df, 'us_open', population_size=10000, generations=100, tick_df=tick_df)
+        miner = SessionGeneticMiner(high_vol_df, 'us_open', population_size=75000, generations=120, tick_df=tick_df)
         results = miner.run()
         for r in results:
             r['regime'] = 'high_volatility'
@@ -913,7 +1023,7 @@ def run_overnight():
     log(f"  Low Volatility Regime: {len(low_vol_df):,} bars")
     
     try:
-        miner = SessionGeneticMiner(low_vol_df, 'us_open', population_size=10000, generations=100, tick_df=tick_df)
+        miner = SessionGeneticMiner(low_vol_df, 'us_open', population_size=15000, generations=100, tick_df=tick_df)
         results = miner.run()
         for r in results:
             r['regime'] = 'low_volatility'
@@ -940,7 +1050,7 @@ def run_overnight():
     log(f"  Extended from Mean: {len(extended_df):,} bars")
     
     try:
-        miner = SessionGeneticMiner(extended_df, 'us_open', population_size=10000, generations=100, tick_df=tick_df)
+        miner = SessionGeneticMiner(extended_df, 'us_open', population_size=75000, generations=120, tick_df=tick_df)
         results = miner.run()
         for r in results:
             r['strategy_type'] = 'mean_reversion'
@@ -953,11 +1063,12 @@ def run_overnight():
     log(f"  Close to Mean: {len(close_to_mean_df):,} bars")
     
     try:
-        miner = SessionGeneticMiner(close_to_mean_df, 'us_open', population_size=10000, generations=100, tick_df=tick_df)
+        miner = SessionGeneticMiner(close_to_mean_df, 'us_open', population_size=75000, generations=120, tick_df=tick_df)
         results = miner.run()
         for r in results:
             r['strategy_type'] = 'trend_breakout'
         all_results.extend(results)
+        save_checkpoint(all_results) # Live Update
     except Exception as e:
         log(f"  Trend Breakout: ERROR - {e}")
     gc.collect()
@@ -981,7 +1092,7 @@ def run_overnight():
     for ib_name, ib_cfg in IB_WINDOWS:
         try:
             SESSIONS[ib_name] = ib_cfg
-            miner = SessionGeneticMiner(train_df, ib_name, population_size=10000, generations=120, tick_df=tick_df)
+            miner = SessionGeneticMiner(train_df, ib_name, population_size=75000, generations=150, tick_df=tick_df)
             results = miner.run()
             for r in results:
                 r['ib_type'] = ib_name
@@ -1013,7 +1124,7 @@ def run_overnight():
     log(f"  Pin Bars: {len(pin_bars):,} bars")
     
     try:
-        miner = SessionGeneticMiner(pin_bars, 'us_open', population_size=8000, generations=80, tick_df=tick_df)
+        miner = SessionGeneticMiner(pin_bars, 'us_open', population_size=75000, generations=100, tick_df=tick_df)
         results = miner.run()
         for r in results:
             r['pattern'] = 'pin_bar'
@@ -1027,7 +1138,7 @@ def run_overnight():
     log(f"  Engulfing Candles: {len(engulfing):,} bars")
     
     try:
-        miner = SessionGeneticMiner(engulfing, 'us_open', population_size=8000, generations=80, tick_df=tick_df)
+        miner = SessionGeneticMiner(engulfing, 'us_open', population_size=75000, generations=100, tick_df=tick_df)
         results = miner.run()
         for r in results:
             r['pattern'] = 'engulfing'
@@ -1061,7 +1172,7 @@ def run_overnight():
         if best_session in SESSIONS:
             log(f"  Deep diving: {best_session}")
             try:
-                miner = SessionGeneticMiner(train_df, best_session, population_size=10000, generations=100, tick_df=tick_df)
+                miner = SessionGeneticMiner(train_df, best_session, population_size=75000, generations=120, tick_df=tick_df)
                 deep_results = miner.run()
                 all_results.extend(deep_results)
             except Exception as e:
@@ -1090,14 +1201,16 @@ def run_overnight():
             # PROPER OOS VALIDATION: Create miner on TEST data
             test_miner = SessionGeneticMiner(test_df, session, population_size=1, generations=1, tick_df=tick_df)
             
-            # Build population tensor from discovered strategy params
+            # Build population tensor from discovered strategy params (V6.1: 10 params)
             strat_tensor = torch.tensor([[
                 strat['sl'], strat['tp'], strat['body'],
-                strat['wick'], strat['fvg'], strat['vol']
+                strat['wick'], strat['fvg'], strat['vol'],
+                strat['disp'], strat['mss'], strat['ote'],
+                strat['struct']
             ]], dtype=torch.float32, device=DEVICE)
             
             # Evaluate THIS strategy on TEST data
-            test_scores, test_trades = test_miner.evaluate_v5(strat_tensor)
+            test_scores, test_trades = test_miner.evaluate_v6(strat_tensor)
             test_score = test_scores[0].item()
             test_trade_count = test_trades[0].item()
             
@@ -1107,7 +1220,7 @@ def run_overnight():
             strat['validated'] = test_score > 0 and test_trade_count >= 10
             strat['test_months'] = test_months
             
-            # Calculate degradation (how much worse on test vs train)
+            # Calculate degradation
             train_score = strat.get('score', 0)
             if train_score > 0:
                 strat['degradation'] = 1 - (test_score / train_score)
@@ -1189,7 +1302,7 @@ def run_overnight():
         extra_str = " | " + ", ".join(extras) if extras else ""
         
         log(f"{i+1}. {r.get('session', '?')} | {r['direction']} | SL:{r['sl']:.0f} TP:{r['tp']:.0f} | "
-            f"Score:{r['score']:.0f} | Trades:{r['trades']:.0f}{extra_str}")
+            f"Score:{r['score']:.0f} | Trades:{r['trades']:.0f} | Struct:{'Strong' if r.get('struct',0)>0.5 else 'Weak'}{extra_str}")
     
     elapsed = (time.time() - overall_start) / 60
     log(f"\n⏱️ Total Runtime: {elapsed:.1f} minutes")

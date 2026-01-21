@@ -792,10 +792,24 @@ class GoldenBot:
             print(f"✅ Trade Count: {self.daily_trade_count}/{MAX_DAILY_TRADES}")
 
 if __name__ == '__main__':
-    bot = GoldenBot()
-    try:
-        asyncio.run(bot.run())
-    except KeyboardInterrupt:
-        print("Bridge stopping...")
-        if bot.gs_logger.enabled:
-            bot.gs_logger.flush_ticks()
+    MAX_RECONNECT_ATTEMPTS = 999  # Essentially infinite reconnects
+    RECONNECT_DELAY_SECONDS = 10
+    
+    for attempt in range(1, MAX_RECONNECT_ATTEMPTS + 1):
+        bot = GoldenBot()
+        try:
+            print(f"\n🔄 IBKR Bridge Start (Attempt {attempt}/{MAX_RECONNECT_ATTEMPTS})")
+            asyncio.run(bot.run())
+            # If run() exits cleanly (isConnected() became False), we reconnect
+            print(f"⚠️ Connection Lost. Reconnecting in {RECONNECT_DELAY_SECONDS}s...")
+            time.sleep(RECONNECT_DELAY_SECONDS)
+        except KeyboardInterrupt:
+            print("Bridge stopping (User Interrupt)...")
+            if bot.gs_logger.enabled:
+                bot.gs_logger.flush_ticks()
+            break  # Exit cleanly on Ctrl+C
+        except Exception as e:
+            print(f"❌ Bridge Error: {e}. Reconnecting in {RECONNECT_DELAY_SECONDS}s...")
+            time.sleep(RECONNECT_DELAY_SECONDS)
+    
+    print("🛑 IBKR Bridge Terminated.")

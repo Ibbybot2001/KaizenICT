@@ -100,6 +100,11 @@ def kill_prior_instances():
             
             for target in targets:
                 if target.lower() in cmdline_str:
+                    # SAFETY EXCLUSION: Never kill the research runner
+                    if "overnight_runner.py" in cmdline_str:
+                        log_sentinel(f"🛡️ SKIPPING defense of Research Runner: PID {proc.info['pid']}")
+                        continue
+                        
                     log_sentinel(f"🔪 Killing prior instance: PID {proc.info['pid']} ({target})")
                     proc.kill()
                     killed.append(proc.info['pid'])
